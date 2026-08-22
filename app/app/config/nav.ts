@@ -1,5 +1,5 @@
 import type { Component } from 'vue'
-import { ArrowLeftRight, ClipboardList, Inbox, LayoutGrid, MonitorSmartphone, Package, ReceiptText, Scale, Tag, Truck } from '@lucide/vue'
+import { ArrowLeftRight, ClipboardList, Inbox, LayoutGrid, MonitorSmartphone, Package, ReceiptText, Scale, Tag, Truck, Users } from '@lucide/vue'
 
 /**
  * The back-office nav, defined ONCE. The sidebar renders it and the topbar breadcrumb
@@ -54,9 +54,12 @@ export const NAV: NavGroup[] = [
     ],
   },
   {
-    // Device and (later) people administration — Users and Stores land here too.
+    // Device and people administration — Stores land here too when they get a screen.
     label: 'Store',
-    items: [{ title: 'Registers', to: '/admin/registers', icon: MonitorSmartphone }],
+    items: [
+      { title: 'Registers', to: '/admin/registers', icon: MonitorSmartphone },
+      { title: 'Staff', to: '/admin/staff', icon: Users },
+    ],
   },
 ]
 

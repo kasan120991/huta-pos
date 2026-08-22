@@ -57,17 +57,23 @@ export function pairingCode(length = 8): string {
  * A temporary numeric PIN for a staff reset.
  *
  * `randomInt` rather than `Math.random` because this is a credential, however short-lived.
- * Six digits, not four: the space `pinLookup` must stay unique across is only 10,000 wide at
- * four, and a temporary PIN handed out by an admin is the one case where we control the
- * length and can afford to make a collision a hundred times less likely. `zPin` accepts 4–6,
- * so the staff member can pick a shorter one for themselves afterwards.
+ *
+ * ⚠️ FOUR digits, and that is dictated by the register, not by preference. `zPin` accepts
+ * 4–6, but `pages/register/sign-in.vue` fixes its pad at `PIN_LENGTH = 4` and auto-submits
+ * on the fourth digit — a deliberate touch affordance. A six-digit temporary PIN is
+ * therefore literally unkeyable at a till: the pad fires at four and rejects it. Six was the
+ * first thing tried here, precisely because it makes the global `pinLookup` collision a
+ * hundred times less likely, and it had to be walked back. If the pad ever grows to accept
+ * 4–6 with an explicit submit, this can grow with it.
+ *
+ * The 10,000-wide space is handled by the retry loop in `user.service.ts`, not by length.
  *
  * Returned to the admin exactly once and never stored in plaintext — the same contract as
  * `pairingCode`.
  */
 export function tempPin(): string {
   let out = ''
-  for (let i = 0; i < 6; i += 1) out += String(randomInt(10))
+  for (let i = 0; i < 4; i += 1) out += String(randomInt(10))
   return out
 }
 

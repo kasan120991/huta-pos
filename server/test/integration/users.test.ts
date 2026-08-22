@@ -49,7 +49,7 @@ describe('staff administration', () => {
       adminId,
     )
 
-    expect(pin).toMatch(/^\d{6}$/)
+    expect(pin).toMatch(/^\d{4}$/)
     expect(user.hasPin).toBe(true)
     expect(user.mustChangePin).toBe(true)
 
@@ -200,7 +200,7 @@ describe('staff administration', () => {
       })
 
       const { pin: fresh } = await resetPin(user.id, adminId)
-      expect(fresh).toMatch(/^\d{6}$/)
+      expect(fresh).toMatch(/^\d{4}$/)
       expect(fresh).not.toBe(pin)
 
       const row = await prisma.user.findUniqueOrThrow({ where: { id: user.id } })

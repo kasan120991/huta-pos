@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { RosterEntry } from '@huta/shared/schemas'
 import PinPad from '~/components/register/PinPad.vue'
-import { ApiError } from '~/composables/useApi'
+import { ApiError, apiFetch } from '~/composables/useApi'
 import { useAuthStore } from '~/stores/auth'
 import { FieldError } from '~/components/ui/field'
 
@@ -68,11 +68,29 @@ async function loadRoster() {
   }
 }
 
+/**
+ * The change-PIN step.
+ *
+ * An admin who resets someone's PIN gets a temporary one, and `attachByPin` REFUSES it with
+ * PIN_CHANGE_REQUIRED rather than opening a session — otherwise the admin would hold a
+ * working credential for that person, in the system whose whole job is attribution. So this
+ * is not an optional nicety: without it a reset person cannot sign in at all.
+ *
+ * `stage` drives the one overlay: enter the temporary PIN, then the new one, then confirm it.
+ */
+type Stage = 'pin' | 'new' | 'confirm'
+const stage = ref<Stage>('pin')
+const tempPin = ref('')
+const newPin = ref('')
+
 function choose(person: RosterEntry) {
   selected.value = person
   pin.value = ''
   pinError.value = null
   lockedSeconds.value = null
+  stage.value = 'pin'
+  tempPin.value = ''
+  newPin.value = ''
 }
 
 function dismiss() {
@@ -80,6 +98,9 @@ function dismiss() {
   pin.value = ''
   pinError.value = null
   lockedSeconds.value = null
+  stage.value = 'pin'
+  tempPin.value = ''
+  newPin.value = ''
 }
 
 // Clear the stale error as soon as they start over, rather than leaving "not recognised"
@@ -87,6 +108,25 @@ function dismiss() {
 watch(pin, (value) => {
   if (value.length > 0 && pinError.value) pinError.value = null
 })
+
+/** Where a completed pad entry goes, depending on which step we are on. */
+function onComplete(value: string) {
+  if (stage.value === 'pin') return void attach(value)
+  if (stage.value === 'new') {
+    newPin.value = value
+    pin.value = ''
+    stage.value = 'confirm'
+    return
+  }
+  if (value !== newPin.value) {
+    pin.value = ''
+    newPin.value = ''
+    stage.value = 'new'
+    pinError.value = 'Those did not match. Choose a new PIN again.'
+    return
+  }
+  void submitNewPin(value)
+}
 
 async function attach(value: string) {
   const person = selected.value
@@ -101,7 +141,13 @@ async function attach(value: string) {
       pinError.value = 'Could not reach the server.'
       return
     }
-    if (error.code === 'ACCOUNT_LOCKED') {
+    if (error.code === 'PIN_CHANGE_REQUIRED') {
+      // The temporary PIN was right. Keep it — the change endpoint re-proves it, which is
+      // what reuses the lockout machinery instead of inventing a second credential path.
+      tempPin.value = value
+      stage.value = 'new'
+      pinError.value = null
+    } else if (error.code === 'ACCOUNT_LOCKED') {
       lockedSeconds.value = error.retryAfterSeconds ?? 900
     } else {
       // 401 — one generic message whether the PIN was wrong or the person is not
@@ -113,6 +159,36 @@ async function attach(value: string) {
   }
 }
 
+async function submitNewPin(value: string) {
+  const person = selected.value
+  if (!person || submitting.value) return
+  submitting.value = true
+  try {
+    await apiFetch('/auth/staff/pin-change', {
+      method: 'POST',
+      body: { userId: person.userId, currentPin: tempPin.value, newPin: value },
+    })
+  } catch (error) {
+    pin.value = ''
+    newPin.value = ''
+    stage.value = 'new'
+    pinError.value
+      = error instanceof ApiError ? error.message : 'Could not reach the server.'
+    return
+  } finally {
+    submitting.value = false
+  }
+
+  // ⚠️ OUTSIDE the try, and after `submitting` has been released, deliberately. `attach`
+  // opens with its own re-entrancy guard — `if (!person || submitting.value) return` — so
+  // calling it while this function still held the flag made it silently no-op: the PIN
+  // changed, and the register sat on the confirm step as though nothing had happened.
+  //
+  // One path mints a session and this is not it; the person signs in normally, with the
+  // PIN they just chose.
+  await attach(value)
+}
+
 /* ————— physical keyboard, active only while the overlay is up ————— */
 function onKeydown(event: KeyboardEvent) {
   if (!selected.value) return
@@ -120,7 +196,7 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault()
     if (submitting.value || pin.value.length >= PIN_LENGTH) return
     pin.value += event.key
-    if (pin.value.length === PIN_LENGTH) void attach(pin.value)
+    if (pin.value.length === PIN_LENGTH) onComplete(pin.value)
   } else if (event.key === 'Backspace') {
     event.preventDefault()
     if (!submitting.value) pin.value = pin.value.slice(0, -1)
@@ -188,11 +264,17 @@ const displayName = (p: RosterEntry) => `${p.firstName} ${p.lastInitial}.`
           {{ displayName(selected) }}
         </div>
 
+        <p v-if="stage !== 'pin'" class="max-w-64 text-center text-sm font-semibold">
+          {{ stage === 'new'
+            ? 'That PIN was temporary. Choose a new one.'
+            : 'Enter it once more to confirm.' }}
+        </p>
+
         <PinPad
           v-model="pin"
           :max-length="PIN_LENGTH"
           :disabled="submitting || lockedSeconds !== null"
-          @complete="attach"
+          @complete="onComplete"
         />
 
         <p v-if="lockoutMessage" role="alert" class="max-w-64 text-center text-sm text-amber-500">
