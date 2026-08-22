@@ -62,6 +62,18 @@ const cannabinoidItems = computed(() =>
 )
 
 const products = ref<CatalogProduct[]>([])
+
+/**
+ * Paging. The grid used to fetch page 1 at pageSize 24 and stop, with no count and no way
+ * forward — so "Ingestibles" showed 24 of its 108 and nothing on screen distinguished
+ * "that's all of them" from "that's the first fifth". `total` comes off the payload, which
+ * has always carried it.
+ */
+const PAGE_SIZE = 24
+const page = ref(1)
+const total = ref(0)
+const loadingMore = ref(false)
+const hasMore = computed(() => products.value.length < total.value)
 const loadingProducts = ref(false)
 const term = ref('')
 const searchInput = ref<{ focus: () => void } | null>(null)
@@ -99,31 +111,37 @@ async function onCameraScanned(code: string) {
   }
 }
 
-async function loadProducts() {
-  loadingProducts.value = true
+async function loadProducts(append = false) {
+  if (append) loadingMore.value = true
+  else loadingProducts.value = true
   try {
     const q = term.value.trim()
-    const page = await apiFetch<CatalogPage>('/catalog/products', {
+    const wanted = append ? page.value + 1 : 1
+    const res = await apiFetch<CatalogPage>('/catalog/products', {
       query: {
         ...(q.length >= 2 ? { search: q } : {}),
         ...(categoryId.value ? { categories: [categoryId.value] } : {}),
         ...(cannabinoidIds.value.length ? { cannabinoids: cannabinoidIds.value } : {}),
         // The grid is scoped HERE — its badges mean "out at this counter".
         ...(auth.terminal ? { storeId: auth.terminal.store.id } : {}),
-        page: 1,
-        pageSize: 24,
+        page: wanted,
+        pageSize: PAGE_SIZE,
       },
     })
-    products.value = page.products as CatalogProduct[]
+    const batch = res.products as CatalogProduct[]
+    products.value = append ? [...products.value, ...batch] : batch
+    page.value = wanted
+    total.value = res.total
 
     // A scan identifies exactly one product — open it in the inspector.
-    if (products.value.length === 1 && looksScanned(q)) {
+    if (!append && products.value.length === 1 && looksScanned(q)) {
       void select(products.value[0]!.id)
       term.value = ''
       await loadProducts()
     }
   } finally {
     loadingProducts.value = false
+    loadingMore.value = false
   }
 }
 
@@ -217,12 +235,34 @@ function hereQty(product: CatalogProduct): string | null {
 const detail = ref<CatalogProductDetail | null>(null)
 const loadingDetail = ref(false)
 
+/**
+ * ONE VARIANT IS ALWAYS SELECTED, and a selected variant always gets the full block.
+ *
+ * This replaces a `variants.length === 1` branch that gave the rich block — price ladder
+ * included — only to single-variant products, and compact rows to everything else. That
+ * was a MONEY BUG once strains became variants on 2026-08-21: `Regular Flower` went
+ * multi-variant, fell to the compact rows, and printed its base rate with no ladder. A
+ * cashier multiplying $10.00/g quoted $35 for an eighth that rings $30, $70 for a quarter
+ * that rings $55, and $280 for an ounce that rings $200.
+ *
+ * There is deliberately no second mode left to forget the ladder in.
+ */
+const selectedVariantId = ref<string | null>(null)
+
+const selectedVariant = computed<CatalogVariant | null>(() => {
+  const list = detail.value?.variants ?? []
+  return list.find((v) => v.id === selectedVariantId.value) ?? list[0] ?? null
+})
+
 async function select(productId: string) {
   loadingDetail.value = true
   try {
     // No storeId: the detail carries EVERY store's on-hand — the read-only cross-store
     // visibility staff are granted, and the answer to "does Ashley have it".
     detail.value = await apiFetch<CatalogProductDetail>(`/catalog/products/${productId}`)
+    // The server sorts variants by price ascending, so the first is the cheapest — the
+    // right default when someone asks "how much is this?".
+    selectedVariantId.value = detail.value.variants[0]?.id ?? null
   } finally {
     loadingDetail.value = false
   }
@@ -413,6 +453,27 @@ const detailImage = computed(() => {
               </span>
             </button>
           </div>
+
+          <!--
+            The count is not decoration. Without it the grid showed 24 of 286 and nothing
+            said so, which reads as "that is the whole shelf" — the silent-truncation trap.
+            It states the honest figure even when there is nothing more to load.
+          -->
+          <div v-if="products.length" class="flex items-center justify-center gap-3 pt-3 pb-1">
+            <span class="text-xs tabular-nums text-muted-foreground">
+              Showing {{ products.length }} of {{ total }}
+            </span>
+            <Button
+              v-if="hasMore"
+              variant="outline"
+              class="h-11 px-5"
+              :disabled="loadingMore"
+              @click="loadProducts(true)"
+            >
+              <Spinner v-if="loadingMore" aria-hidden="true" />
+              {{ loadingMore ? 'Loading…' : `Load ${Math.min(PAGE_SIZE, total - products.length)} more` }}
+            </Button>
+          </div>
         </div>
       </main>
 
@@ -459,14 +520,41 @@ const detailImage = computed(() => {
             </span>
           </div>
 
-          <!-- one variant: the rich block; several: compact rows -->
-          <template v-if="detail.variants.length === 1">
-            <div v-for="variant in detail.variants" :key="variant.id" class="flex flex-col gap-3">
-              <div v-if="variant.trackingMode === 'WEIGHT' && variant.priceGroup">
+          <!--
+            Option A's inspector: pick an option, always get the full block. See
+            `selectedVariantId` for why the old single-variant gate was a money bug.
+          -->
+          <div v-if="detail.variants.length > 1" class="flex flex-col gap-1.5">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {{ detail.category.name === 'Flower' ? 'Strains' : 'Options' }} · {{ detail.variants.length }}
+            </p>
+            <div class="flex flex-wrap gap-1.5">
+              <button
+                v-for="variant in detail.variants"
+                :key="variant.id"
+                type="button"
+                class="min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-semibold transition-colors"
+                :class="variant.id === selectedVariant?.id
+                  ? 'border-primary/60 bg-primary/12 text-primary'
+                  : 'text-muted-foreground hover:border-primary/40 hover:bg-accent/40'"
+                :aria-pressed="variant.id === selectedVariant?.id"
+                @click="selectedVariantId = variant.id"
+              >
+                {{ variant.label ?? detail.name }}
+                <span class="block text-[11px] font-medium tabular-nums opacity-70">
+                  {{ variantPriceText(variant) }}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <template v-if="selectedVariant">
+            <div class="flex flex-col gap-3">
+              <div v-if="selectedVariant.trackingMode === 'WEIGHT' && selectedVariant.priceGroup">
                 <p class="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Price ladder</p>
                 <div class="flex flex-col gap-1">
                   <div
-                    v-for="row in ladderRows(variant)"
+                    v-for="row in ladderRows(selectedVariant)"
                     :key="row.label"
                     class="flex items-center justify-between rounded-lg border bg-background/60 px-3 py-1.5 text-sm"
                   >
@@ -475,16 +563,25 @@ const detailImage = computed(() => {
                   </div>
                 </div>
               </div>
-              <div v-else class="flex items-center justify-between rounded-lg border bg-background/60 px-3 py-2">
-                <span class="text-sm">{{ variant.label ?? 'Price' }}</span>
-                <span class="text-base font-bold tabular-nums text-primary">{{ variantPriceText(variant) }}</span>
+              <!--
+                Only when there is no option picker above. With one, the pill already
+                carries this variant's label and price, and repeating them here says the
+                same thing twice. A WEIGHT variant is different — the ladder above is not
+                what the pill shows — so it always renders.
+              -->
+              <div
+                v-else-if="detail.variants.length === 1"
+                class="flex items-center justify-between rounded-lg border bg-background/60 px-3 py-2"
+              >
+                <span class="text-sm">{{ selectedVariant.label ?? 'Price' }}</span>
+                <span class="text-base font-bold tabular-nums text-primary">{{ variantPriceText(selectedVariant) }}</span>
               </div>
 
               <div>
                 <p class="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">On hand</p>
                 <div class="flex flex-col gap-1">
                   <div
-                    v-for="row in storeRows(variant)"
+                    v-for="row in storeRows(selectedVariant)"
                     :key="row.storeId"
                     class="flex items-center justify-between rounded-lg border bg-background/60 px-3 py-1.5 text-sm"
                   >
@@ -495,33 +592,15 @@ const detailImage = computed(() => {
                       class="font-bold tabular-nums"
                       :class="row.quantityBase <= 0 ? 'text-destructive' : row.storeId === hereId ? 'text-primary' : 'text-muted-foreground'"
                     >
-                      {{ qty(row.quantityBase, variant.trackingMode) }}
+                      {{ qty(row.quantityBase, selectedVariant.trackingMode) }}
                     </span>
                   </div>
                 </div>
               </div>
 
-              <Button class="h-12 text-base font-bold" @click="ringUp(variant.id)">Ring it up →</Button>
+              <Button class="h-12 text-base font-bold" @click="ringUp(selectedVariant.id)">Ring it up →</Button>
             </div>
           </template>
-
-          <div v-else class="flex flex-col gap-1.5">
-            <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Options</p>
-            <div
-              v-for="variant in detail.variants"
-              :key="variant.id"
-              class="flex items-center gap-2 rounded-lg border bg-background/60 px-3 py-2"
-            >
-              <div class="min-w-0 flex-1">
-                <p class="truncate text-sm font-semibold">{{ variant.label ?? detail.name }}</p>
-                <p class="text-[11px] tabular-nums text-muted-foreground">
-                  {{ storeRows(variant).map((row) => `${storeNameById.get(row.storeId)?.split(' ')[0] ?? '—'}${row.storeId === hereId ? ' (here)' : ''}: ${qty(row.quantityBase, variant.trackingMode)}`).join(' · ') }}
-                </p>
-              </div>
-              <span class="shrink-0 text-sm font-bold tabular-nums text-primary">{{ variantPriceText(variant) }}</span>
-              <Button variant="outline" size="sm" class="h-8 shrink-0" @click="ringUp(variant.id)">Ring up</Button>
-            </div>
-          </div>
 
           <p v-if="detail.description" class="text-sm leading-relaxed text-muted-foreground">
             {{ detail.description }}
