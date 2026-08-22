@@ -39,6 +39,7 @@ import {
 import { Input } from '~/components/ui/input'
 import { ApiError, apiFetch } from '~/composables/useApi'
 import { getStripe, paymentsConfig } from '~/composables/useStripe'
+import { useTimeclock } from '~/composables/useTimeclock'
 import { useAuthStore } from '~/stores/auth'
 
 /**
@@ -55,11 +56,22 @@ const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 
+/**
+ * Shared with the home tile — one piece of state, so the two cannot disagree.
+ *
+ * The nudge below is the only clock affordance on this screen: it appears when they are
+ * clocked OUT and lets them fix that. There is deliberately no clocked-IN indicator here,
+ * because the persistent top-bar pill was removed (Kasan, 2026-08-22) — clocking OUT is done
+ * from the register home.
+ */
+const clock = useTimeclock()
+
 /* ————— guard + shift gate ————— */
 const shift = ref<ShiftRow | null>(null)
 const booted = ref(false)
 
 onMounted(async () => {
+  void clock.refresh()
   if (!auth.resolved) await auth.fetchPrincipal()
   if (!auth.isAuthenticated) return router.replace('/register/pair')
   if (auth.isUnattendedTerminal) return router.replace('/register/sign-in')
@@ -869,6 +881,25 @@ const STATUS_BADGE: Record<string, { label: string; class: string }> = {
 
       <!-- browse -->
       <main class="flex min-w-0 flex-1 flex-col gap-3 p-4">
+        <!--
+          WARN, NEVER BLOCK (Kasan, 2026-08-22). A line, not a dialog: nothing here is
+          disabled and the sale rings exactly as it would otherwise. A timeclock bug must
+          never be the reason a customer cannot be served, so this can only ever nag.
+          Staff only — an admin has no clock, so `applies` hides it entirely.
+        -->
+        <button
+          v-if="clock.applies.value && !clock.clockedIn.value"
+          type="button"
+          class="flex min-h-11 items-center gap-3 rounded-xl border border-amber-500/40 bg-amber-500/8 px-4 text-left text-sm font-semibold text-amber-600 transition-colors hover:bg-amber-500/14 dark:text-amber-400"
+          :disabled="clock.busy.value"
+          @click="clock.toggle()"
+        >
+          You're not clocked in.
+          <span class="ml-auto rounded-lg border border-amber-500/50 px-3 py-1 text-xs">
+            {{ clock.busy.value ? 'Working…' : 'Clock in' }}
+          </span>
+        </button>
+
         <div class="relative">
           <Search class="pointer-events-none absolute left-3.5 top-1/2 z-10 size-4 -translate-y-1/2 text-primary" />
           <SearchInput

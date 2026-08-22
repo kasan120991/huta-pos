@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import type { CatalogReference, StaffAdminRow } from '@huta/shared/schemas'
+import type {
+  CatalogReference,
+  StaffAdminRow,
+  TimeEntryPage,
+  TimeEntryRow,
+} from '@huta/shared/schemas'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -42,8 +47,9 @@ import {
 } from '~/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '~/components/ui/tabs'
 import { Toggle } from '~/components/ui/toggle'
+import { ToggleGroup, ToggleGroupItem } from '~/components/ui/toggle-group'
 import { ApiError, apiFetch } from '~/composables/useApi'
-import { UserX } from '@lucide/vue'
+import { Clock, UserX } from '@lucide/vue'
 
 /**
  * Staff (Kasan's option A, 2026-08-22) — index, then a full workspace.
@@ -289,8 +295,112 @@ function confirmDeactivate() {
   if (person) void setActive(person, false)
 }
 
+/* ————— the Hours tab ————— */
+const hours = ref<TimeEntryPage | null>(null)
+const hoursLoading = ref(false)
+const RANGES = [
+  { key: '7', label: 'Last 7 days' },
+  { key: '30', label: 'Last 30 days' },
+  { key: '90', label: 'Last 90 days' },
+] as const
+const range = ref<(typeof RANGES)[number]['key']>('30')
+
+/** `YYYY-MM-DD`, which is what the endpoint takes — business days, not instants. */
+function isoDay(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+async function loadHours(userId: string) {
+  hoursLoading.value = true
+  try {
+    const from = new Date()
+    from.setDate(from.getDate() - Number(range.value))
+    const res = await apiFetch<TimeEntryPage>('/timeclock/entries', {
+      query: { userId, from: isoDay(from), to: isoDay(new Date()) },
+    })
+    // Stale-response guard: the admin may have moved on while this was in flight.
+    if (selectedId.value !== userId) return
+    hours.value = res
+  }
+  catch (err) {
+    actionError.value = err instanceof ApiError ? err.message : 'Something went wrong.'
+  }
+  finally {
+    hoursLoading.value = false
+  }
+}
+
+/** Entries grouped into the days they STARTED on. An overnight shift belongs to its start. */
+const hourDays = computed(() => {
+  const groups = new Map<string, { label: string, entries: TimeEntryRow[], minutes: number, estimated: number }>()
+  for (const e of hours.value?.entries ?? []) {
+    const d = new Date(e.clockedInAt)
+    const key = isoDay(d)
+    const group = groups.get(key) ?? {
+      label: d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }),
+      entries: [],
+      minutes: 0,
+      estimated: 0,
+    }
+    group.entries.push(e)
+    if (e.minutes !== null) {
+      if (e.status === 'AUTO') group.estimated += e.minutes
+      else group.minutes += e.minutes
+    }
+    groups.set(key, group)
+  }
+  return [...groups.values()]
+})
+
+function hm(total: number): string {
+  const h = Math.floor(total / 60)
+  return h > 0 ? `${h}h ${total % 60}m` : `${total}m`
+}
+
+const clockTime = (iso: string) =>
+  new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+
+/* ————— correcting an entry ————— */
+const fixing = ref<TimeEntryRow | null>(null)
+const fixEnd = ref('')
+const fixNote = ref('')
+const fixError = ref<string | null>(null)
+
+function startFix(entry: TimeEntryRow) {
+  fixing.value = entry
+  // Seed with whatever the system guessed, so the admin edits rather than retypes.
+  const seed = entry.clockedOutAt ? new Date(entry.clockedOutAt) : new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  fixEnd.value = `${seed.getFullYear()}-${pad(seed.getMonth() + 1)}-${pad(seed.getDate())}T${pad(seed.getHours())}:${pad(seed.getMinutes())}`
+  fixNote.value = ''
+  fixError.value = null
+}
+
+async function saveFix() {
+  const entry = fixing.value
+  if (!entry || !fixNote.value.trim() || !fixEnd.value) return
+  fixError.value = null
+  try {
+    await apiFetch(`/timeclock/entries/${entry.id}`, {
+      method: 'PATCH',
+      body: { clockedOutAt: new Date(fixEnd.value).toISOString(), note: fixNote.value.trim() },
+    })
+    fixing.value = null
+    if (selectedId.value) await loadHours(selectedId.value)
+  }
+  catch (err) {
+    fixError.value = err instanceof ApiError ? err.message : 'Something went wrong.'
+  }
+}
+
 const tab = ref('overview')
-watch(selectedId, () => (tab.value = 'overview'))
+watch(selectedId, () => {
+  tab.value = 'overview'
+  hours.value = null
+})
+watch([tab, range], () => {
+  if (tab.value === 'hours' && selectedId.value) void loadHours(selectedId.value)
+})
 </script>
 
 <template>
@@ -451,6 +561,7 @@ watch(selectedId, () => (tab.value = 'overview'))
       <Tabs v-model="tab">
         <TabsList variant="line">
           <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger v-if="selected.role === 'STAFF'" value="hours">Hours</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" class="pt-4">
@@ -494,6 +605,122 @@ watch(selectedId, () => (tab.value = 'overview'))
           <p class="mt-4 text-xs text-muted-foreground">
             Role can't be changed here — Admin and Staff use different credentials
             (a password versus a PIN). Deactivate them and add them again under the other role.
+          </p>
+        </TabsContent>
+
+        <TabsContent v-if="selected.role === 'STAFF'" value="hours" class="pt-4">
+          <div class="mb-4 flex flex-wrap items-center gap-3">
+            <ToggleGroup
+              :model-value="range"
+              type="single"
+              :spacing="2"
+              aria-label="Date range"
+              class="flex-wrap"
+              @update:model-value="(v) => v && (range = v as typeof range)"
+            >
+              <ToggleGroupItem
+                v-for="r in RANGES"
+                :key="r.key"
+                :value="r.key"
+                class="inline-flex h-9 items-center rounded-lg border border-dashed border-input px-3 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground data-[state=on]:border-solid data-[state=on]:border-primary/50 data-[state=on]:bg-transparent data-[state=on]:text-foreground"
+              >
+                {{ r.label }}
+              </ToggleGroupItem>
+            </ToggleGroup>
+            <Spinner v-if="hoursLoading" aria-hidden="true" class="text-muted-foreground" />
+          </div>
+
+          <!--
+            ⚠️ TWO FIGURES, NEVER ONE. The server keeps `totalMinutes` and
+            `estimatedMinutes` apart because an AUTO entry's end time is a guess it made at
+            the cutoff when nobody clocked out. Adding them would put an invented number in
+            someone's pay with nothing on screen saying so.
+          -->
+          <div v-if="hours" class="mb-4 flex flex-wrap gap-3">
+            <div class="rounded-xl border px-4 py-3">
+              <p class="text-xl font-extrabold tabular-nums">{{ hm(hours.totalMinutes) }}</p>
+              <p class="text-xs text-muted-foreground">Recorded</p>
+            </div>
+            <div
+              v-if="hours.estimatedMinutes > 0"
+              class="rounded-xl border border-amber-500/40 bg-amber-500/8 px-4 py-3"
+            >
+              <p class="text-xl font-extrabold tabular-nums text-amber-600 dark:text-amber-400">
+                {{ hm(hours.estimatedMinutes) }}
+              </p>
+              <p class="text-xs text-amber-600/80 dark:text-amber-400/80">Estimated</p>
+            </div>
+            <div v-if="hours.openCount > 0" class="rounded-xl border px-4 py-3">
+              <p class="text-xl font-extrabold tabular-nums">{{ hours.openCount }}</p>
+              <p class="text-xs text-muted-foreground">On the clock now</p>
+            </div>
+          </div>
+
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Day</TableHead>
+                <TableHead>In</TableHead>
+                <TableHead>Out</TableHead>
+                <TableHead class="text-right">Hours</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <template v-for="day in hourDays" :key="day.label">
+                <TableRow class="bg-muted/40">
+                  <TableCell colspan="5" class="font-semibold">
+                    {{ day.label }} — {{ hm(day.minutes) }}<span
+                      v-if="day.estimated > 0"
+                      class="text-amber-600 dark:text-amber-400"
+                    > + {{ hm(day.estimated) }} estimated</span>
+                  </TableCell>
+                </TableRow>
+                <TableRow v-for="e in day.entries" :key="e.id">
+                  <TableCell />
+                  <TableCell class="tabular-nums">{{ clockTime(e.clockedInAt) }}</TableCell>
+                  <TableCell class="tabular-nums">
+                    <span v-if="!e.clockedOutAt" class="text-primary font-semibold">Still on the clock</span>
+                    <span v-else :class="e.status === 'AUTO' ? 'text-amber-600 dark:text-amber-400' : ''">
+                      {{ clockTime(e.clockedOutAt) }}<template v-if="e.status === 'AUTO'"> · estimated</template>
+                      <template v-else-if="e.status === 'CORRECTED'"> · corrected</template>
+                    </span>
+                  </TableCell>
+                  <TableCell
+                    class="text-right tabular-nums"
+                    :class="e.status === 'AUTO' ? 'text-amber-600 dark:text-amber-400' : ''"
+                  >
+                    {{ e.minutes === null ? '—' : hm(e.minutes) }}
+                  </TableCell>
+                  <TableCell class="text-right">
+                    <Button
+                      size="sm"
+                      :variant="e.status === 'AUTO' ? 'default' : 'outline'"
+                      @click="startFix(e)"
+                    >
+                      {{ e.status === 'AUTO' ? 'Fix' : 'Edit' }}
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              </template>
+              <TableEmpty v-if="!hourDays.length && !hoursLoading" :colspan="5">
+                <Empty class="flex-none border">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon"><Clock /></EmptyMedia>
+                    <EmptyTitle>No hours in this range</EmptyTitle>
+                    <EmptyDescription>They clock in and out from a register.</EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              </TableEmpty>
+            </TableBody>
+          </Table>
+
+          <p
+            v-if="hours && hours.estimatedMinutes > 0"
+            class="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/8 px-4 py-2.5 text-sm text-amber-600 dark:text-amber-400"
+          >
+            Some entries have no clock-out and were closed at the 12-hour cutoff. Those hours
+            are a guess until you set the real time.
           </p>
         </TabsContent>
       </Tabs>
@@ -591,6 +818,41 @@ watch(selectedId, () => (tab.value = 'overview'))
 
         <DialogFooter>
           <Button @click="revealFor = null">Done</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- ─────────────── correct a time entry ─────────────── -->
+    <Dialog :open="fixing !== null" @update:open="(o: boolean) => !o && (fixing = null)">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Set the real end time</DialogTitle>
+          <DialogDescription>
+            <template v-if="fixing?.status === 'AUTO'">
+              Nobody clocked out, so this was closed at the 12-hour cutoff. The hours are a
+              guess until you correct them.
+            </template>
+            <template v-else>Changing a recorded entry. It stays in the audit trail.</template>
+          </DialogDescription>
+        </DialogHeader>
+
+        <FieldGroup class="gap-4">
+          <Field>
+            <FieldLabel for="fix-end">Clocked out at</FieldLabel>
+            <Input id="fix-end" v-model="fixEnd" type="datetime-local" />
+          </Field>
+          <Field>
+            <!-- The database refuses a correction without one: a changed timesheet with no
+                 reason is not an audit trail, and this is what someone gets paid from. -->
+            <FieldLabel for="fix-note">Reason</FieldLabel>
+            <Input id="fix-note" v-model="fixNote" placeholder="e.g. She left at 4pm" autocomplete="off" />
+            <FieldError v-if="fixError">{{ fixError }}</FieldError>
+          </Field>
+        </FieldGroup>
+
+        <DialogFooter>
+          <Button variant="ghost" @click="fixing = null">Cancel</Button>
+          <Button :disabled="!fixNote.trim() || !fixEnd" @click="saveFix">Save</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import type { TimeEntryStatus } from '../enums.js'
 import { zCuid, zPin } from './primitives.js'
 
 /**
@@ -105,6 +106,42 @@ export interface TerminalAdminRow {
 export interface PairingCodeIssued {
   readonly code: string
   readonly expiresAt: string
+}
+
+// --- the timeclock ------------------------------------------------------------------------
+
+/**
+ * One stretch of time a person was at work.
+ *
+ * `minutes` is null while the entry is OPEN — there is nothing to measure yet, and a zero
+ * would read as "worked no time" rather than "still working".
+ */
+export interface TimeEntryRow {
+  readonly id: string
+  readonly userId: string
+  readonly userName: string
+  readonly storeId: string
+  readonly storeName: string
+  readonly clockedInAt: string
+  readonly clockedOutAt: string | null
+  readonly status: TimeEntryStatus
+  readonly minutes: number | null
+  readonly note: string | null
+  readonly closedByName: string | null
+}
+
+/**
+ * ⚠️ `totalMinutes` and `estimatedMinutes` are SEPARATE and must stay that way on screen.
+ *
+ * An AUTO entry's end time is a guess the server made at the cutoff because nobody clocked
+ * out. Adding the two together would put an invented number into someone's pay with nothing
+ * saying so. Render them as two figures — "38h 20m, of which 12h estimated".
+ */
+export interface TimeEntryPage {
+  readonly entries: readonly TimeEntryRow[]
+  readonly totalMinutes: number
+  readonly estimatedMinutes: number
+  readonly openCount: number
 }
 
 // --- staff administration (the Staff back-office screen) ----------------------------------
