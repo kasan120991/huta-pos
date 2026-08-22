@@ -1,7 +1,7 @@
 import { Role } from '@huta/shared'
 
 import { prisma } from '../db/client.js'
-import { AccountLockedError, UnauthorizedError } from '../errors/index.js'
+import { AccountLockedError, PinChangeRequiredError, UnauthorizedError } from '../errors/index.js'
 import { pinLookup, randomToken, sha256 } from '../lib/crypto.js'
 import { hashSecret, verifySecret } from '../lib/password.js'
 import { REFRESH_TOKEN_TTL_SECONDS } from '../lib/tokens.js'
@@ -126,10 +126,17 @@ export async function attachByPin(
   const ok = await verifySecret(user.pinHash, pin)
   if (!ok) throw new UnauthorizedError('That PIN was not recognised.')
 
+  // The PIN was right, so clear the lockout counters either way — a person who has just
+  // proved who they are should not stay locked because of earlier fumbles.
   await prisma.user.update({
     where: { id: user.id },
     data: { failedPinAttempts: 0, lockedUntil: null, lastLoginAt: new Date() },
   })
+
+  // AFTER verification, deliberately: refusing earlier would tell an unauthenticated
+  // caller which accounts are mid-reset without them having proved anything. No session is
+  // created — see PinChangeRequiredError for why attaching first would be a hole.
+  if (user.mustChangePin) throw new PinChangeRequiredError()
 
   const principal: AdminPrincipal | StaffPrincipal =
     user.role === Role.ADMIN

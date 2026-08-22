@@ -107,6 +107,67 @@ export interface PairingCodeIssued {
   readonly expiresAt: string
 }
 
+// --- staff administration (the Staff back-office screen) ----------------------------------
+
+/**
+ * A staff member as the admin roster sees them.
+ *
+ * Note what is ABSENT and must stay absent: `pinHash`, `pinLookup` and `passwordHash`. The
+ * server builds this from an explicit select for that reason — a bare `findUnique` on User
+ * returns all three.
+ */
+export interface StaffAdminRow {
+  readonly id: string
+  readonly firstName: string
+  readonly lastName: string
+  readonly email: string | null
+  readonly role: 'ADMIN' | 'STAFF'
+  readonly active: boolean
+  /** Null for an admin, who has no home store. */
+  readonly store: { readonly id: string, readonly name: string } | null
+  /** True while a system-generated temporary PIN is outstanding. */
+  readonly mustChangePin: boolean
+  /** Whether they can sign in at a register at all. */
+  readonly hasPin: boolean
+  /** Set only while a lockout is in force; the admin can clear it. */
+  readonly lockedUntil: string | null
+  readonly failedPinAttempts: number
+  readonly lastLoginAt: string | null
+  readonly createdAt: string
+}
+
+export const staffCreateSchema = z.object({
+  firstName: z.string().trim().min(1).max(80),
+  lastName: z.string().trim().min(1).max(80),
+  email: z.string().trim().email().max(200).optional(),
+  /** Required: a STAFF row without a store violates `User_role_store_scope_check`. */
+  storeId: z.string().min(1),
+})
+export type StaffCreateRequest = z.input<typeof staffCreateSchema>
+
+/**
+ * No `role` field, deliberately. Moving a person between ADMIN and STAFF has to satisfy
+ * `User_admin_credentials_check` and `User_staff_credentials_check` in the same statement —
+ * a password appearing or disappearing, a store unsetting or setting, a PIN required or
+ * forbidden. That is a second feature, not a field on this one.
+ */
+export const staffPatchSchema = z
+  .object({
+    firstName: z.string().trim().min(1).max(80),
+    lastName: z.string().trim().min(1).max(80),
+    email: z.string().trim().email().max(200).nullable(),
+    storeId: z.string().min(1),
+    active: z.boolean(),
+  })
+  .partial()
+export type StaffPatch = z.input<typeof staffPatchSchema>
+
+/** What a PIN reset returns. Shown ONCE — only the argon2 hash and lookup are stored. */
+export interface TempPinIssued {
+  readonly userId: string
+  readonly pin: string
+}
+
 /**
  * The error envelope every failed request returns. Modelled here so the client renders
  * one known shape rather than guessing per endpoint.
@@ -119,6 +180,7 @@ export const ERROR_CODES = [
   'VALIDATION_FAILED',
   'RATE_LIMITED',
   'ACCOUNT_LOCKED',
+  'PIN_CHANGE_REQUIRED',
   'STEP_UP_REQUIRED',
   'INSUFFICIENT_STOCK',
   'AGE_VERIFICATION_REQUIRED',

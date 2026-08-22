@@ -14,6 +14,7 @@ export type ErrorCode =
   | 'VALIDATION_FAILED'
   | 'RATE_LIMITED'
   | 'ACCOUNT_LOCKED'
+  | 'PIN_CHANGE_REQUIRED'
   | 'STEP_UP_REQUIRED'
   | 'INSUFFICIENT_STOCK'
   | 'AGE_VERIFICATION_REQUIRED'
@@ -80,6 +81,24 @@ export class AccountLockedError extends AppError {
     super(423, 'ACCOUNT_LOCKED', 'Too many failed attempts. Try again shortly.', {
       retryAfterSeconds,
     })
+  }
+}
+
+/**
+ * The PIN is correct but it is a temporary one an admin issued, so it may not open a
+ * session.
+ *
+ * ⚠️ This REFUSES rather than attaching and reporting the flag, and that is the whole
+ * point. Attaching would mint a 12-hour staff session on a PIN the admin who reset it
+ * knows — they could walk to a terminal and ring sales attributed to that person. In a
+ * system whose entire purpose is knowing who did what, that is the hole to avoid.
+ *
+ * Thrown only AFTER the PIN verifies, so it never tells an unauthenticated caller which
+ * accounts are mid-reset.
+ */
+export class PinChangeRequiredError extends AppError {
+  constructor() {
+    super(403, 'PIN_CHANGE_REQUIRED', 'Choose a new PIN before signing in.')
   }
 }
 

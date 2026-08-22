@@ -189,6 +189,13 @@ model User {
   lastLoginAt       DateTime?
   failedPinAttempts Int       @default(0)
   lockedUntil       DateTime?
+
+  /// Set when an admin resets a PIN to a system-generated temporary one. The register
+  /// forces a change at the next sign-in and clears it. Deliberately NOT a CHECK against
+  /// pinHash: a person can legitimately have a permanent PIN and this flag false, or a
+  /// temporary PIN and this flag true, and nothing else is a valid combination to police.
+  mustChangePin     Boolean   @default(false)
+
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 

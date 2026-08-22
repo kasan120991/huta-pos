@@ -53,6 +53,24 @@ export function pairingCode(length = 8): string {
   return `${out.slice(0, 4)}-${out.slice(4)}`
 }
 
+/**
+ * A temporary numeric PIN for a staff reset.
+ *
+ * `randomInt` rather than `Math.random` because this is a credential, however short-lived.
+ * Six digits, not four: the space `pinLookup` must stay unique across is only 10,000 wide at
+ * four, and a temporary PIN handed out by an admin is the one case where we control the
+ * length and can afford to make a collision a hundred times less likely. `zPin` accepts 4–6,
+ * so the staff member can pick a shorter one for themselves afterwards.
+ *
+ * Returned to the admin exactly once and never stored in plaintext — the same contract as
+ * `pairingCode`.
+ */
+export function tempPin(): string {
+  let out = ''
+  for (let i = 0; i < 6; i += 1) out += String(randomInt(10))
+  return out
+}
+
 /** Normalise a typed pairing code: strip separators, fold case. */
 export function normalizePairingCode(input: string): string {
   return input.replace(/[^0-9a-zA-Z]/g, '').toUpperCase()

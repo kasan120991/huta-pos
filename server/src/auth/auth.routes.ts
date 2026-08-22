@@ -2,8 +2,10 @@ import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
 import { z } from 'zod'
 
+import { staffCreateSchema, staffPatchSchema } from '@huta/shared/schemas'
+
 import { prisma } from '../db/client.js'
-import { UnauthorizedError } from '../errors/index.js'
+import { PinChangeRequiredError, UnauthorizedError, ValidationError } from '../errors/index.js'
 import {
   COOKIE,
   clearSessionCookies,
@@ -24,9 +26,18 @@ import {
   roster,
   rotateRefreshToken,
 } from './auth.service.js'
-import { CAPABILITIES } from './permissions.js'
+import { assertCan, CAPABILITIES } from './permissions.js'
 import { actingUserId } from './principal.js'
 import { authorize } from './stepup.service.js'
+import {
+  changeOwnPin,
+  clearLockout,
+  createStaff,
+  getUser,
+  listUsers,
+  resetPin,
+  updateUser,
+} from './user.service.js'
 import {
   createPairingCode,
   createTerminal,
@@ -203,6 +214,78 @@ authRouter.patch(
   },
 )
 
+// --- staff administration (the Staff back-office screen) --------------------------------
+
+/**
+ * `user.manage` has existed in permissions.ts since the auth phase with ZERO call sites.
+ * These are its first. `requireAdmin` already narrows to admins, so `assertCan` is belt and
+ * braces — but it is the belt every other admin surface wears, and it is what makes the
+ * capability real rather than decorative.
+ */
+function actorId(req: Parameters<typeof requirePrincipal>[0]): string {
+  const principal = requirePrincipal(req)
+  assertCan(principal, 'user.manage')
+  if (principal.userId === null) throw new UnauthorizedError()
+  return principal.userId
+}
+
+authRouter.get('/users', requireAdmin, async (req, res) => {
+  actorId(req)
+  const includeInactive = req.query['includeInactive'] === 'true'
+  res.json({ users: await listUsers(includeInactive) })
+})
+
+const userIdParam = z.object({ id: z.cuid() })
+
+authRouter.get('/users/:id', requireAdmin, validateParams(userIdParam), async (req, res) => {
+  actorId(req)
+  res.json(await getUser(req.params['id'] as string))
+})
+
+authRouter.post('/users', requireAdmin, validateBody(staffCreateSchema), async (req, res) => {
+  const body = req.body as z.infer<typeof staffCreateSchema>
+  const created = await createStaff(
+    {
+      firstName: body.firstName,
+      lastName: body.lastName,
+      ...(body.email !== undefined ? { email: body.email } : {}),
+      storeId: body.storeId,
+    },
+    actorId(req),
+  )
+  // The PIN travels in this response and nowhere else — never logged, never audited.
+  res.status(201).json(created)
+})
+
+authRouter.patch(
+  '/users/:id',
+  requireAdmin,
+  validateParams(userIdParam),
+  validateBody(staffPatchSchema),
+  async (req, res) => {
+    res.json(
+      await updateUser(
+        req.params['id'] as string,
+        req.body as z.infer<typeof staffPatchSchema>,
+        actorId(req),
+      ),
+    )
+  },
+)
+
+authRouter.post(
+  '/users/:id/pin/reset',
+  requireAdmin,
+  validateParams(userIdParam),
+  async (req, res) => {
+    res.json(await resetPin(req.params['id'] as string, actorId(req)))
+  },
+)
+
+authRouter.post('/users/:id/unlock', requireAdmin, validateParams(userIdParam), async (req, res) => {
+  res.json(await clearLockout(req.params['id'] as string, actorId(req)))
+})
+
 // --- staff attach / detach -------------------------------------------------------------
 
 /**
@@ -221,6 +304,60 @@ const pinSchema = z.object({
   userId: z.cuid(),
   pin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4 to 6 digits.'),
 })
+
+/**
+ * Replace a temporary PIN with one only the person knows.
+ *
+ * Terminal-authenticated like `/staff/attach`, behind the same limiter, and it re-proves the
+ * CURRENT pin through `attachByPin`'s own machinery rather than inventing a second
+ * credential path — which means the lockout counters, the atomic attempt reservation and the
+ * store check all apply here for free. A short-lived "change token" was considered and
+ * dropped: it would be a second way to prove identity, and the whole lockout design exists
+ * because there is only one.
+ *
+ * It does NOT attach. The register runs the ordinary attach with the new PIN afterwards, so
+ * there stays exactly one path that mints a session.
+ */
+const pinChangeSchema = z.object({
+  userId: z.cuid(),
+  currentPin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4 to 6 digits.'),
+  newPin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4 to 6 digits.'),
+})
+
+authRouter.post(
+  '/staff/pin-change',
+  pinLimiter,
+  validateBody(pinChangeSchema),
+  async (req, res) => {
+    const principal = requirePrincipal(req)
+    if (principal.kind !== 'terminal') {
+      throw new UnauthorizedError('This register is not paired to a store.')
+    }
+    const { userId, currentPin, newPin } = req.body as z.infer<typeof pinChangeSchema>
+    if (currentPin === newPin) {
+      throw new ValidationError('Choose a PIN different from the temporary one.')
+    }
+
+    // Throws PinChangeRequiredError on success, which is the expected outcome here — it is
+    // how we learn the current PIN was right AND that a change is genuinely owed. Anything
+    // else (wrong PIN, locked, wrong store) propagates untouched.
+    let proved = false
+    try {
+      await attachByPin(userId, currentPin, principal.terminalId, principal.storeId)
+    }
+    catch (error) {
+      if (error instanceof PinChangeRequiredError) proved = true
+      else throw error
+    }
+    if (!proved) {
+      // The PIN was right but no change is owed — this endpoint is only for temporary PINs.
+      throw new ValidationError('That PIN does not need changing.')
+    }
+
+    await changeOwnPin(userId, newPin)
+    res.status(204).end()
+  },
+)
 
 authRouter.post('/staff/attach', pinLimiter, validateBody(pinSchema), async (req, res) => {
   const principal = requirePrincipal(req)
