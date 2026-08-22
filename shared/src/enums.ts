@@ -104,6 +104,25 @@ export const ShiftStatus = {
 export type ShiftStatus = (typeof ShiftStatus)[keyof typeof ShiftStatus]
 export const SHIFT_STATUS_VALUES = Object.values(ShiftStatus) as readonly ShiftStatus[]
 
+/**
+ * How a time entry ended — the difference between a fact and an estimate.
+ *
+ * AUTO is the one that matters: nobody clocked out and the entry was closed at the cutoff,
+ * so its end time is a GUESS. Any figure derived from it has to say so, or someone gets paid
+ * from a number the system invented.
+ */
+export const TimeEntryStatus = {
+  OPEN: 'OPEN',
+  CLOCKED: 'CLOCKED',
+  AUTO: 'AUTO',
+  CORRECTED: 'CORRECTED',
+  VOIDED: 'VOIDED',
+} as const
+export type TimeEntryStatus = (typeof TimeEntryStatus)[keyof typeof TimeEntryStatus]
+export const TIME_ENTRY_STATUS_VALUES = Object.values(
+  TimeEntryStatus,
+) as readonly TimeEntryStatus[]
+
 export const CashMovementType = {
   PAID_IN: 'PAID_IN',
   PAID_OUT: 'PAID_OUT',

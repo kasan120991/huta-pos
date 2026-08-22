@@ -1,0 +1,336 @@
+import type { Principal } from '../auth/principal.js'
+import { assertCan } from '../auth/permissions.js'
+import { prisma } from '../db/client.js'
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors/index.js'
+
+/**
+ * The timeclock — a person's working hours.
+ *
+ * ⚠️ DELIBERATELY NOT A SHIFT. A `Shift` is one cash drawer per STORE: in this database one
+ * has run 47 hours, several carry two different cashiers, and one was opened by one person
+ * and closed by another. It records money custody, not attendance, and hours cannot be
+ * derived from it. That is why this table exists.
+ *
+ * Three rules Kasan set on 2026-08-22:
+ *   · STAFF ONLY. An admin is not on a clock.
+ *   · WARN, NEVER BLOCK. Ringing a sale does not require an open entry; the register
+ *     nudges. A timeclock bug must never be the reason a customer cannot be served.
+ *   · AUTO-CLOSE AT A CUTOFF, marked as an estimate.
+ */
+
+/**
+ * How long an entry may stay open before it is treated as abandoned.
+ *
+ * Twelve hours, matching `DEVICE_SESSION_TTL_SECONDS` — the staff cookie dies at the same
+ * point, so a person who is still genuinely working has had to sign in again anyway. The
+ * longest real shift here is around twelve, so this errs toward UNDER-counting rather than
+ * inventing hours nobody worked; an admin corrects it either way, and `status: AUTO` is what
+ * makes the difference visible.
+ */
+export const AUTO_CLOSE_HOURS = 12
+
+/**
+ * Lazily close anything abandoned, and return how many were closed.
+ *
+ * ⚠️ THERE IS NO SCHEDULER IN THIS CODEBASE, and this does not add one. Both existing
+ * expiries — pairing codes and step-up grants — resolve at READ time by comparing against
+ * `new Date()`, and this follows them: an entry older than the cutoff is materialised as
+ * closed the next time anything looks at that person's clock. A cron would be a new
+ * operational dependency for one feature, and one that fails silently at 3am.
+ *
+ * Scoped to one user when a user is given, so a clock-in does not sweep the whole table.
+ */
+export async function resolveAbandoned(userId?: string): Promise<number> {
+  const cutoff = new Date(Date.now() - AUTO_CLOSE_HOURS * 3600 * 1000)
+  const stale = await prisma.timeEntry.findMany({
+    where: { status: 'OPEN', clockedInAt: { lt: cutoff }, ...(userId ? { userId } : {}) },
+    select: { id: true, clockedInAt: true },
+  })
+  for (const entry of stale) {
+    await prisma.timeEntry.update({
+      where: { id: entry.id },
+      data: {
+        // The cutoff, not "now" — closing at read time would grow the estimate every time
+        // someone loaded the page, so the same abandoned shift would be worth more hours on
+        // Friday than it was on Tuesday.
+        clockedOutAt: new Date(entry.clockedInAt.getTime() + AUTO_CLOSE_HOURS * 3600 * 1000),
+        status: 'AUTO',
+      },
+    })
+  }
+  return stale.length
+}
+
+const entrySelect = {
+  id: true,
+  userId: true,
+  storeId: true,
+  clockedInAt: true,
+  clockedOutAt: true,
+  status: true,
+  note: true,
+  user: { select: { firstName: true, lastName: true } },
+  store: { select: { name: true } },
+  closedBy: { select: { firstName: true, lastName: true } },
+} as const
+
+type Selected = Awaited<ReturnType<typeof prisma.timeEntry.findFirstOrThrow<{ select: typeof entrySelect }>>>
+
+/** Whole minutes, floored. Null while an entry is still open — there is nothing to measure. */
+export function minutesOf(entry: { clockedInAt: Date, clockedOutAt: Date | null }): number | null {
+  if (!entry.clockedOutAt) return null
+  return Math.floor((entry.clockedOutAt.getTime() - entry.clockedInAt.getTime()) / 60_000)
+}
+
+function toRow(e: Selected) {
+  return {
+    id: e.id,
+    userId: e.userId,
+    userName: `${e.user.firstName} ${e.user.lastName}`,
+    storeId: e.storeId,
+    storeName: e.store.name,
+    clockedInAt: e.clockedInAt.toISOString(),
+    clockedOutAt: e.clockedOutAt?.toISOString() ?? null,
+    status: e.status,
+    minutes: minutesOf(e),
+    note: e.note,
+    closedByName: e.closedBy ? `${e.closedBy.firstName} ${e.closedBy.lastName}` : null,
+  }
+}
+
+/* ————— what a person does at a register ————— */
+
+/**
+ * Only STAFF punch a clock, and only for themselves.
+ *
+ * There is no capability for this and none is needed: `principal.userId` IS the subject, so
+ * there is no other person's record to reach. Adding a `timeclock.punch` capability would
+ * put a row in the permission matrix that both roles hold, which says nothing.
+ */
+function requireStaff(principal: Principal): { userId: string, storeId: string, terminalId: string } {
+  if (principal.kind !== 'staff') {
+    throw new ForbiddenError(
+      principal.kind === 'admin'
+        ? 'Admins are not on the clock.'
+        : 'Sign in before clocking on.',
+    )
+  }
+  return {
+    userId: principal.userId,
+    storeId: principal.storeId,
+    terminalId: principal.terminalId,
+  }
+}
+
+export async function clockIn(principal: Principal) {
+  const me = requireStaff(principal)
+  await resolveAbandoned(me.userId)
+
+  try {
+    const created = await prisma.timeEntry.create({
+      data: {
+        userId: me.userId,
+        // From the TERMINAL, never a request body — the same rule every store-scoped write
+        // follows, and it is what gives an entry a correct store without trusting a client.
+        storeId: me.storeId,
+        clockedInTerminalId: me.terminalId,
+        status: 'OPEN',
+      },
+      select: entrySelect,
+    })
+    return toRow(created)
+  }
+  catch (error) {
+    // The partial unique index caught a second open entry — either a double tap or a second
+    // till. Report WHEN they clocked in, so the answer is useful rather than a refusal.
+    if ((error as { code?: string }).code === 'P2002') {
+      const open = await prisma.timeEntry.findFirst({
+        where: { userId: me.userId, status: 'OPEN' },
+        select: { clockedInAt: true },
+      })
+      const at = open?.clockedInAt.toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+      })
+      throw new ConflictError(at ? `You clocked in at ${at}.` : 'You are already clocked in.')
+    }
+    throw error
+  }
+}
+
+export async function clockOut(principal: Principal) {
+  const me = requireStaff(principal)
+  await resolveAbandoned(me.userId)
+
+  const open = await prisma.timeEntry.findFirst({
+    where: { userId: me.userId, status: 'OPEN' },
+    select: { id: true },
+  })
+  if (!open) throw new ConflictError('You are not clocked in.')
+
+  const closed = await prisma.timeEntry.update({
+    where: { id: open.id },
+    data: {
+      clockedOutAt: new Date(),
+      clockedOutTerminalId: me.terminalId,
+      status: 'CLOCKED',
+      closedById: me.userId,
+    },
+    select: entrySelect,
+  })
+  return toRow(closed)
+}
+
+/** The open entry, or null. What the register's clock button reads to decide its label. */
+export async function currentEntry(principal: Principal) {
+  if (principal.kind !== 'staff') return null
+  await resolveAbandoned(principal.userId)
+  const open = await prisma.timeEntry.findFirst({
+    where: { userId: principal.userId, status: 'OPEN' },
+    select: entrySelect,
+  })
+  return open ? toRow(open) : null
+}
+
+/* ————— what an admin does on the Staff page ————— */
+
+export interface EntryFilter {
+  readonly userId?: string | undefined
+  readonly from?: string | undefined
+  readonly to?: string | undefined
+}
+
+/**
+ * Gated on `user.manage` rather than a new `timeclock.manage`.
+ *
+ * There are two roles and an admin holds everything, so a separate capability would add a
+ * row to the permission matrix with no behavioural difference today. If a "manager
+ * who can fix timesheets but not create people" ever exists, splitting it is one constant
+ * and one call site.
+ */
+export async function listEntries(principal: Principal, filter: EntryFilter) {
+  assertCan(principal, 'user.manage')
+  await resolveAbandoned(filter.userId)
+
+  const entries = await prisma.timeEntry.findMany({
+    where: {
+      ...(filter.userId ? { userId: filter.userId } : {}),
+      ...(filter.from || filter.to
+        ? {
+            clockedInAt: {
+              ...(filter.from ? { gte: new Date(filter.from) } : {}),
+              // Half-open: a `lte` against midnight drops everything after 00:00 on the
+              // end date, the same trap the sales history documents.
+              ...(filter.to ? { lt: new Date(new Date(filter.to).getTime() + 86_400_000) } : {}),
+            },
+          }
+        : {}),
+      status: { not: 'VOIDED' },
+    },
+    select: entrySelect,
+    orderBy: [{ clockedInAt: 'desc' }, { id: 'desc' }],
+    take: 500,
+  })
+
+  const rows = entries.map(toRow)
+
+  /**
+   * Estimated minutes are reported SEPARATELY, never folded in silently.
+   *
+   * An AUTO entry's end time is a guess the system made. Rolling it into one total would
+   * mean paying someone from a number nobody keyed, with nothing on screen saying so. The
+   * caller can add them together and say "38h 20m, of which 6h estimated" — which is the
+   * honest version of the same figure.
+   */
+  const counted = rows.filter((r) => r.minutes !== null)
+  return {
+    entries: rows,
+    totalMinutes: counted
+      .filter((r) => r.status !== 'AUTO')
+      .reduce((sum, r) => sum + (r.minutes ?? 0), 0),
+    estimatedMinutes: counted
+      .filter((r) => r.status === 'AUTO')
+      .reduce((sum, r) => sum + (r.minutes ?? 0), 0),
+    openCount: rows.filter((r) => r.status === 'OPEN').length,
+  }
+}
+
+export interface EntryCorrection {
+  readonly clockedOutAt: string
+  readonly note: string
+}
+
+/** Supply the real end time for an entry the system guessed at, or that is still open. */
+export async function correctEntry(
+  principal: Principal,
+  id: string,
+  input: EntryCorrection,
+  actorId: string,
+) {
+  assertCan(principal, 'user.manage')
+
+  const existing = await prisma.timeEntry.findUnique({
+    where: { id },
+    select: { id: true, clockedInAt: true, clockedOutAt: true, status: true },
+  })
+  if (!existing) throw new NotFoundError('That time entry does not exist.')
+  if (existing.status === 'VOIDED') throw new ValidationError('That entry was discarded.')
+
+  const end = new Date(input.clockedOutAt)
+  if (Number.isNaN(end.getTime())) throw new ValidationError('That is not a valid time.')
+  // Refuse before the CHECK does, with a sentence that says what is wrong.
+  if (end <= existing.clockedInAt) {
+    throw new ValidationError('The end time has to be after the start time.')
+  }
+  if (end > new Date()) throw new ValidationError('The end time cannot be in the future.')
+
+  const updated = await prisma.timeEntry.update({
+    where: { id },
+    data: { clockedOutAt: end, status: 'CORRECTED', closedById: actorId, note: input.note },
+    select: entrySelect,
+  })
+
+  await prisma.auditLog.create({
+    data: {
+      userId: actorId,
+      action: 'timeclock.correct',
+      entityType: 'TimeEntry',
+      entityId: id,
+      before: {
+        clockedOutAt: existing.clockedOutAt?.toISOString() ?? null,
+        status: existing.status,
+      },
+      after: { clockedOutAt: end.toISOString(), status: 'CORRECTED', note: input.note },
+    },
+  })
+  return toRow(updated)
+}
+
+/** Discard an entry. Excluded from every figure, never deleted — nothing here is. */
+export async function voidEntry(principal: Principal, id: string, note: string, actorId: string) {
+  assertCan(principal, 'user.manage')
+
+  const existing = await prisma.timeEntry.findUnique({
+    where: { id },
+    select: { id: true, status: true, clockedOutAt: true },
+  })
+  if (!existing) throw new NotFoundError('That time entry does not exist.')
+
+  const updated = await prisma.timeEntry.update({
+    where: { id },
+    data: { status: 'VOIDED', note, closedById: actorId },
+    select: entrySelect,
+  })
+
+  await prisma.auditLog.create({
+    data: {
+      userId: actorId,
+      action: 'timeclock.void',
+      entityType: 'TimeEntry',
+      entityId: id,
+      before: { status: existing.status },
+      after: { status: 'VOIDED', note },
+    },
+  })
+  return toRow(updated)
+}

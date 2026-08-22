@@ -11,6 +11,7 @@ import { stripeWebhookHandler } from './payments/webhook.js'
 import { pricingRouter } from './pricing/pricing.routes.js'
 import { purchaseOrderRouter } from './purchasing/purchase-order.routes.js'
 import { receivingRouter } from './receiving/receiving.routes.js'
+import { timeclockRouter } from './people/timeclock.routes.js'
 import { salesRouter } from './sales/sales.routes.js'
 import { shiftRouter } from './sales/shift.routes.js'
 import { supplierRouter } from './suppliers/supplier.routes.js'
@@ -70,6 +71,7 @@ export function createApp(): Express {
   app.use('/api/purchase-orders', purchaseOrderRouter)
   app.use('/api/receiving', receivingRouter)
   app.use('/api/shifts', shiftRouter)
+  app.use('/api/timeclock', timeclockRouter)
   app.use('/api/sales', salesRouter)
   app.use('/api/payments', paymentsRouter)
   app.use('/api/transfers', transferRouter)

@@ -97,6 +97,21 @@ enum ShiftStatus {
   CLOSED
 }
 
+/// How a time entry ended, which is the difference between a fact and an estimate.
+///
+/// CLOCKED  — the person pressed Clock out. A real end time.
+/// AUTO     — nobody did, and the entry was closed at the cutoff. The end time is a
+///            GUESS and every figure derived from it must say so.
+/// CORRECTED— an admin supplied the real end time afterwards.
+/// VOIDED   — an admin discarded the entry. Excluded from every total, never deleted.
+enum TimeEntryStatus {
+  OPEN
+  CLOCKED
+  AUTO
+  CORRECTED
+  VOIDED
+}
+
 enum CashMovementType {
   PAID_IN
   PAID_OUT
@@ -164,6 +179,7 @@ model Store {
   transfersSourced   TransferRequest[]   @relation("SourceStore")
 
   @@index([active])
+  timeEntries TimeEntry[]
 }
 
 model User {
@@ -204,6 +220,8 @@ model User {
   salesAsCashier        Sale[]                @relation("SaleCashier")
   salesAgeVerified      Sale[]                @relation("SaleAgeVerifier")
   salesVoided           Sale[]                @relation("SaleVoider")
+  timeEntries           TimeEntry[]
+  timeEntriesClosed     TimeEntry[]           @relation("TimeEntryCloser")
   shiftsOpened          Shift[]               @relation("ShiftOpener")
   shiftsClosed          Shift[]               @relation("ShiftCloser")
   cashMovements         CashMovement[]
@@ -256,6 +274,8 @@ model Terminal {
   /// regenerating a device token silently creates a SECOND terminal.
   @@unique([storeId, name])
   @@index([storeId, active])
+  timeEntriesIn  TimeEntry[] @relation("TimeEntryInTerminal")
+  timeEntriesOut TimeEntry[] @relation("TimeEntryOutTerminal")
 }
 
 /// One-time code an admin generates so a new register can enrol itself.
@@ -1019,6 +1039,56 @@ model ReceiptLine {
 // ---------------------------------------------------------------------------
 // Shifts and cash
 // ---------------------------------------------------------------------------
+
+/// A person's working hours — deliberately NOT a Shift.
+///
+/// A Shift is one cash drawer per STORE: in this database one has run 47 hours, several
+/// carry two different cashiers, and one was opened by one person and closed by another.
+/// Nothing about it describes when an individual was at work, so hours cannot be derived
+/// from it and this table exists instead.
+///
+/// Recorded by the person, at a register, independent of the drawer. Clocking in is NOT
+/// required to ring a sale — the register nudges, it never blocks (Kasan, 2026-08-22),
+/// because a timeclock bug must never be the reason a customer cannot be served.
+model TimeEntry {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  /// From the TERMINAL, never a request body — the same rule every store-scoped write follows.
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Restrict)
+
+  /// Which till they punched at, each end. Cannot be reconstructed later, costs nothing now.
+  clockedInTerminalId  String?
+  clockedInTerminal    Terminal? @relation("TimeEntryInTerminal", fields: [clockedInTerminalId], references: [id], onDelete: SetNull)
+  clockedOutTerminalId String?
+  clockedOutTerminal   Terminal? @relation("TimeEntryOutTerminal", fields: [clockedOutTerminalId], references: [id], onDelete: SetNull)
+
+  clockedInAt  DateTime  @default(now())
+  clockedOutAt DateTime?
+
+  status TimeEntryStatus @default(OPEN)
+
+  /// Who ended it. The person themselves for a normal clock-out; an admin for a correction.
+  closedById String?
+  closedBy   User?   @relation("TimeEntryCloser", fields: [closedById], references: [id], onDelete: SetNull)
+
+  /// Required by the service on any admin correction or void — a changed timesheet without
+  /// a reason is not an audit trail.
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// No duration column, ever. It is derived from the two timestamps, the same rule that
+  /// keeps received-vs-ordered and average unit cost out of the schema: a stored duration
+  /// drifts the first time a timestamp is corrected.
+  @@index([userId, clockedInAt])
+  @@index([storeId, clockedInAt])
+  @@index([status])
+}
 
 model Shift {
   id      String @id @default(cuid())
