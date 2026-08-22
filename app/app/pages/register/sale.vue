@@ -130,9 +130,6 @@ interface Card {
 }
 
 const cards = ref<Card[]>([])
-
-/** Hot-linked legacy image URLs: a dead one falls back to the letter tile, once. */
-const brokenImages = reactive(new Set<string>())
 const loadingProducts = ref(false)
 const term = ref('')
 const searchInput = ref<{ focus: () => void } | null>(null)
@@ -937,60 +934,31 @@ const STATUS_BADGE: Record<string, { label: string; class: string }> = {
               <EmptyDescription>Try another search or category.</EmptyDescription>
             </EmptyHeader>
           </Empty>
-          <!--
-            Card 1 (Kasan, 2026-08-22): thumbnail LEFT, square.
-
-            Every product photo in this catalogue is 1200×1200. The old card had no image at
-            all here and the catalog's card gave one an 80px-tall FULL-WIDTH band — a 5.5:1
-            slot for a 1:1 source, which `object-cover` crops to an 18% horizontal strip. A
-            square slot shows a square source whole, and still fills correctly if a stray
-            non-square image ever appears.
-
-            Turning the card on its side also triples the shelf — ~36 variants visible where
-            the old tall cards fitted 12 — which matters most on the screen you ring from.
-          -->
           <div class="grid grid-cols-2 gap-2.5 lg:grid-cols-3 xl:grid-cols-4">
             <button
               v-for="card in cards"
               :key="card.variantId"
               type="button"
-              class="flex items-center gap-2.5 rounded-2xl border bg-card p-2.5 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
+              class="flex flex-col gap-1 rounded-2xl border bg-card p-3 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
               @click="addCard(card)"
             >
-              <span class="flex size-13 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-accent/60">
-                <img
-                  v-if="card.imageUrl && !brokenImages.has(card.imageUrl)"
-                  :src="card.imageUrl"
-                  :alt="card.productName"
-                  class="size-full object-cover"
-                  loading="lazy"
-                  @error="brokenImages.add(card.imageUrl)"
-                />
-                <span v-else class="text-lg font-extrabold text-muted-foreground/50">
-                  {{ card.productName.charAt(0) }}
-                </span>
-              </span>
-
-              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span class="flex items-start justify-between gap-2">
                 <span class="line-clamp-2 text-sm font-semibold leading-snug">{{ card.productName }}</span>
-                <span v-if="card.label && card.label !== card.productName" class="truncate text-xs text-muted-foreground">
-                  {{ card.label }}
-                </span>
-              </span>
-
-              <span class="flex shrink-0 flex-col items-end gap-1">
                 <span
                   v-if="STATUS_BADGE[card.stockStatus]"
-                  class="rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+                  class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
                   :class="STATUS_BADGE[card.stockStatus]!.class"
                 >
                   {{ STATUS_BADGE[card.stockStatus]!.label }}
                 </span>
-                <span class="flex items-center gap-1.5">
-                  <span class="text-sm font-bold tabular-nums text-primary">{{ card.priceText }}</span>
-                  <span class="flex size-7 items-center justify-center rounded-lg bg-primary/12 text-primary">
-                    <Plus class="size-4" />
-                  </span>
+              </span>
+              <span v-if="card.label && card.label !== card.productName" class="truncate text-xs text-muted-foreground">
+                {{ card.label }}
+              </span>
+              <span class="mt-auto flex items-center justify-between pt-1.5">
+                <span class="text-sm font-bold tabular-nums text-primary">{{ card.priceText }}</span>
+                <span class="flex size-7 items-center justify-center rounded-lg bg-primary/12 text-primary">
+                  <Plus class="size-4" />
                 </span>
               </span>
             </button>
