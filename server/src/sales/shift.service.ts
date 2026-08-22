@@ -1,7 +1,13 @@
-import type { CashMovementInput, CashMovementRow, ShiftRow } from '@huta/shared/schemas'
+import type {
+  CashMovementInput,
+  CashMovementRow,
+  ShiftListRow,
+  ShiftRow,
+} from '@huta/shared/schemas'
 
 import type { Principal } from '../auth/principal.js'
 import { assertCan } from '../auth/permissions.js'
+import { resolveMoneyStores } from '../auth/store-scope.js'
 import { prisma } from '../db/client.js'
 import type { Prisma } from '../generated/prisma/client.js'
 import { ConflictError, ForbiddenError, NotFoundError } from '../errors/index.js'
@@ -214,6 +220,97 @@ export async function currentShift(principal: Principal, storeId: string): Promi
     select: shiftSelect,
   })
   return shift ? toShiftRow(prisma, shift) : null
+}
+
+export interface ShiftFilter {
+  readonly storeId?: string | undefined
+  /** Business days, `YYYY-MM-DD`, resolved against the store's own timezone. */
+  readonly from?: string | undefined
+  readonly to?: string | undefined
+  /** Drawers this person opened OR closed — the two custody facts a Shift records. */
+  readonly userId?: string | undefined
+}
+
+/**
+ * The drawer list. Did not exist before 2026-08-22 — a variance was only ever visible at the
+ * register that closed it.
+ *
+ * TWO QUERIES for the whole page, not two hundred. `toShiftRow` is deliberately not used
+ * here: it runs three sequential queries per row, and it does not need to, because a CLOSED
+ * shift already carries its money in columns that `closeShift` wrote once. Sale counts come
+ * back for every row in a single `groupBy`.
+ *
+ * Scoped with the SHARED money resolver: cross-store stays on `report.view`, own store on
+ * `shift.manage`, which is the capability that already governs opening and closing one.
+ */
+export async function listShifts(
+  principal: Principal,
+  filter: ShiftFilter,
+): Promise<ShiftListRow[]> {
+  const stores = await resolveMoneyStores(principal, filter.storeId, 'shift.manage')
+  const storeIds = stores.map((s) => s.id)
+
+  const shifts = await prisma.shift.findMany({
+    where: {
+      storeId: { in: storeIds },
+      ...(filter.userId
+        ? { OR: [{ openedById: filter.userId }, { closedById: filter.userId }] }
+        : {}),
+      ...(filter.from || filter.to
+        ? {
+            openedAt: {
+              ...(filter.from ? { gte: new Date(`${filter.from}T00:00:00`) } : {}),
+              // Half-open. A `lte` against midnight drops everything opened after 00:00 on
+              // the end date — the trap the sales history already documents.
+              ...(filter.to
+                ? { lt: new Date(new Date(`${filter.to}T00:00:00`).getTime() + 86_400_000) }
+                : {}),
+            },
+          }
+        : {}),
+    },
+    select: {
+      id: true,
+      storeId: true,
+      status: true,
+      openedAt: true,
+      closedAt: true,
+      openingCashCents: true,
+      closingCountedCashCents: true,
+      expectedCashCents: true,
+      varianceCents: true,
+      store: { select: { name: true } },
+      openedBy: { select: { firstName: true, lastName: true } },
+      closedBy: { select: { firstName: true, lastName: true } },
+    },
+    // The `id` tiebreak matters: shifts opened in the same second would otherwise sort
+    // unstably under paging and show a row twice. Same fix the sales ledger carries.
+    orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
+    take: 200,
+  })
+
+  const counts = await prisma.sale.groupBy({
+    by: ['shiftId'],
+    where: { shiftId: { in: shifts.map((s) => s.id) } },
+    _count: { _all: true },
+  })
+  const countFor = new Map(counts.map((c) => [c.shiftId, c._count._all]))
+
+  return shifts.map((s) => ({
+    id: s.id,
+    storeId: s.storeId,
+    storeName: s.store.name,
+    status: s.status,
+    openedAt: s.openedAt.toISOString(),
+    openedByName: `${s.openedBy.firstName} ${s.openedBy.lastName}`,
+    closedAt: s.closedAt?.toISOString() ?? null,
+    closedByName: s.closedBy ? `${s.closedBy.firstName} ${s.closedBy.lastName}` : null,
+    openingCashCents: s.openingCashCents,
+    closingCountedCashCents: s.closingCountedCashCents,
+    expectedCashCents: s.expectedCashCents,
+    varianceCents: s.varianceCents,
+    saleCount: countFor.get(s.id) ?? 0,
+  }))
 }
 
 export async function getShift(principal: Principal, shiftId: string): Promise<ShiftRow> {

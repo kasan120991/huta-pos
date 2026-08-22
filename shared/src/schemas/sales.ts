@@ -21,6 +21,34 @@ import type { ManualDiscountInput } from './pricing.js'
 
 // --- shifts ------------------------------------------------------------------------------
 
+/**
+ * A drawer as the LIST shows it — deliberately leaner than `ShiftRow`.
+ *
+ * `ShiftRow` calls `cashFigures` (three sequential queries) plus `movementSums` for every
+ * row, which is fine for one drawer and 200 round trips for a page of fifty. It is also
+ * unnecessary: a CLOSED shift already stores its money in columns, because `closeShift`
+ * computed it once at close. So the list reads the columns, gets sale counts for the whole
+ * page in one grouped query, and leaves the full figures to `GET /shifts/:id`.
+ *
+ * An OPEN drawer has no `expectedCashCents` or `varianceCents` — there is nothing to
+ * compare against until it is counted, and the CHECK constraint enforces that.
+ */
+export interface ShiftListRow {
+  readonly id: string
+  readonly storeId: string
+  readonly storeName: string
+  readonly status: ShiftStatus
+  readonly openedAt: string
+  readonly openedByName: string
+  readonly closedAt: string | null
+  readonly closedByName: string | null
+  readonly openingCashCents: number
+  readonly closingCountedCashCents: number | null
+  readonly expectedCashCents: number | null
+  readonly varianceCents: number | null
+  readonly saleCount: number
+}
+
 export interface ShiftRow {
   readonly id: string
   readonly storeId: string

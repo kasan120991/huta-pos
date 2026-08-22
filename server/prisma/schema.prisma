@@ -846,6 +846,7 @@ model InventoryMovement {
   @@index([saleId])
   @@index([receiptId])
   @@index([transferRequestId])
+  @@index([userId, createdAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1123,8 @@ model Shift {
 
   @@index([storeId, status])
   @@index([storeId, openedAt])
+  @@index([openedById, openedAt])
+  @@index([closedById])
 }
 
 model CashMovement {
@@ -1433,6 +1436,7 @@ model Refund {
   @@index([shiftId])
   /// Refunds are summed by their OWN date in the history totals (same rule as shiftId).
   @@index([createdAt])
+  @@index([refundedById, createdAt])
 }
 
 model RefundLine {

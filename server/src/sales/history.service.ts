@@ -8,6 +8,8 @@ import type {
 
 import { assertCan } from '../auth/permissions.js'
 import type { Principal } from '../auth/principal.js'
+import type { ScopeStore } from '../auth/store-scope.js'
+import { resolveMoneyStores } from '../auth/store-scope.js'
 import { prisma } from '../db/client.js'
 import { NotFoundError } from '../errors/index.js'
 import type { Prisma } from '../generated/prisma/client.js'
@@ -27,68 +29,14 @@ import type { Prisma } from '../generated/prisma/client.js'
  * decided, at its Prisma select.
  */
 
-interface ScopeStore {
-  readonly id: string
-  readonly name: string
-  readonly timezone: string
-}
-
 /**
- * Which stores this request may see.
- *
- * Same shape as the catalog's `resolveStoreIds` but gated on a DIFFERENT capability, and
- * that difference is the point: cross-store STOCK is a read the permission matrix grants everyone,
- * cross-store MONEY is not. `report.view` is absent from STAFF_CAPABILITIES, so it is
- * admin-only by construction. This is its first use.
- *
- * `scopeStoreId` is wrong here for the same reason it is wrong in the catalog — it makes a
- * store mandatory for an admin, so it cannot express "every store", which is the default
- * view of a back-office history.
+ * Store scoping moved to `auth/store-scope.ts` on 2026-08-22, when the drawer list needed
+ * the identical rule. Two independently derived money-scope resolvers drift, and the one
+ * that drifts open is a money one. This alias keeps the call sites below reading naturally.
  */
-async function resolveHistoryStores(
-  principal: Principal,
-  requestedStoreId: string | undefined,
-): Promise<ScopeStore[]> {
-  const stores = await prisma.store.findMany({
-    where: { active: true },
-    select: { id: true, name: true, timezone: true },
-    orderBy: { name: 'asc' },
-  })
+const resolveHistoryStores = (principal: Principal, storeId: string | undefined) =>
+  resolveMoneyStores(principal, storeId, 'sale.ring')
 
-  if (requestedStoreId === undefined) {
-    // A store-scoped principal is PINNED to their own store rather than refused — a cashier
-    // opening the register's history should see their store, not a 403.
-    if (principal.storeId !== null) {
-      const own = stores.find((s) => s.id === principal.storeId)
-      if (!own) throw new NotFoundError('That store does not exist.')
-      assertCan(principal, 'sale.ring', { storeId: own.id })
-      return [own]
-    }
-    assertCan(principal, 'report.view')
-    return stores
-  }
-
-  const match = stores.find((s) => s.id === requestedStoreId)
-  if (!match) throw new NotFoundError('That store does not exist.')
-  if (principal.storeId === requestedStoreId) {
-    assertCan(principal, 'sale.ring', { storeId: match.id })
-  } else {
-    assertCan(principal, 'report.view')
-  }
-  return [match]
-}
-
-/* ————— business days, in the STORE's timezone ————— */
-
-/**
- * `Store.timezone` says so in the schema: "Shift and report boundaries use this, never the
- * server's timezone." A day boundary is a fact about the shop's calendar, and a report cut
- * on the server's clock would put an evening sale on the wrong day.
- *
- * When a scope spans stores that share a zone — which both Huta stores do — that zone is
- * unambiguous. When it does not, one day column cannot be honest for both, so the first
- * store's zone is used and returned to the caller, which renders it beside the range.
- */
 function scopeTimezone(stores: readonly ScopeStore[]): string {
   const first = stores[0]?.timezone ?? 'UTC'
   return stores.every((s) => s.timezone === first) ? first : first

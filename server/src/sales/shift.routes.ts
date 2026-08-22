@@ -10,6 +10,7 @@ import {
   addCashMovement,
   closeShift,
   currentShift,
+  listShifts,
   getShift,
   listCashMovements,
   openShift,
@@ -27,6 +28,22 @@ export const shiftRouter: Router = Router()
 
 const storeQuery = z.object({ storeId: z.cuid().optional() })
 const idParam = z.object({ id: z.cuid() })
+
+/**
+ * The drawer list. Declared above '/:id' — the file's convention is literals first, and a
+ * bare '/' would otherwise be ambiguous to read even where it is not ambiguous to match.
+ */
+const shiftListQuery = z.object({
+  storeId: z.cuid().optional(),
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  userId: z.cuid().optional(),
+})
+
+shiftRouter.get('/', async (req, res) => {
+  const filter = shiftListQuery.parse(req.query)
+  res.json({ shifts: await listShifts(requirePrincipal(req), filter) })
+})
 
 shiftRouter.get('/current', requireAuth, requirePerson, validateQuery(storeQuery), async (req, res) => {
   const principal = requirePrincipal(req)

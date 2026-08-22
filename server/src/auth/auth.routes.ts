@@ -29,6 +29,7 @@ import {
 import { assertCan, CAPABILITIES } from './permissions.js'
 import { actingUserId } from './principal.js'
 import { authorize } from './stepup.service.js'
+import { activityFeed, activityFor } from '../people/activity.service.js'
 import {
   changeOwnPin,
   clearLockout,
@@ -285,6 +286,27 @@ authRouter.post(
 authRouter.post('/users/:id/unlock', requireAdmin, validateParams(userIdParam), async (req, res) => {
   res.json(await clearLockout(req.params['id'] as string, actorId(req)))
 })
+
+const activityQuery = z.object({
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+})
+
+authRouter.get(
+  '/users/:id/activity',
+  requireAdmin,
+  validateParams(userIdParam),
+  async (req, res) => {
+    const principal = requirePrincipal(req)
+    const id = req.params['id'] as string
+    const range = activityQuery.parse(req.query)
+    const [totals, feed] = await Promise.all([
+      activityFor(principal, id, range),
+      activityFeed(principal, id),
+    ])
+    res.json({ totals, feed })
+  },
+)
 
 // --- staff attach / detach -------------------------------------------------------------
 
