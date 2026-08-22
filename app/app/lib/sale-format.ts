@@ -73,3 +73,70 @@ export function refundStatusNote(status: string): string | null {
   if (status === 'PENDING') return 'pending'
   return null
 }
+
+/* ————— the cash drawer ————— */
+
+/**
+ * A drawer's variance, in one place.
+ *
+ * This existed TWICE before 2026-08-22 and the two disagreed: the staff page said
+ * `'still open'` / `'no variance recorded'` / `'$0.00'`, while the register's close screen
+ * said `exact` / `short` / `over` and tinted BOTH directions amber. Adding a third copy for
+ * the drawer list is what forced the extraction — the same argument that pulled
+ * `parseDollars` into `lib/money.ts`.
+ *
+ * The register's wording wins: `exact` / `short` / `over` is what staff already read at the
+ * count, and a back-office page inventing its own vocabulary for the same number would make
+ * the two surfaces describe one fact differently.
+ *
+ * Amber in BOTH directions, deliberately. A drawer $20 OVER is not good news — it means the
+ * same thing a shortfall does, that the count and the takings disagree, and tinting it green
+ * would teach people to scroll past it.
+ */
+export interface VarianceView {
+  /** `+$5.00` / `−$100.00` / `$0.00`, or `—` when there is nothing to compare against. */
+  readonly amount: string
+  /** `exact` / `short` / `over` / `still open` / `not counted`. */
+  readonly word: string
+  /** Tailwind text colour token for the figure. */
+  readonly tone: string
+  /** Whether this drawer needs a human to look at it. */
+  readonly off: boolean
+}
+
+export function varianceView(
+  varianceCents: number | null,
+  status: 'OPEN' | 'CLOSED',
+): VarianceView {
+  if (varianceCents === null) {
+    // An OPEN drawer has no expected figure yet — that is not a missing value, it is a
+    // question that cannot be asked until someone counts. A CLOSED one without a variance
+    // is a different and stranger fact, so it gets its own words rather than sharing these.
+    return status === 'OPEN'
+      ? { amount: '—', word: 'still open', tone: 'text-muted-foreground', off: false }
+      : { amount: '—', word: 'not counted', tone: 'text-muted-foreground', off: false }
+  }
+  if (varianceCents === 0) {
+    return { amount: money(0), word: 'exact', tone: 'text-muted-foreground', off: false }
+  }
+  return {
+    // U+2212 MINUS SIGN, not a hyphen — the codebase is consistent about this.
+    amount: `${varianceCents > 0 ? '+' : '−'}${money(Math.abs(varianceCents))}`,
+    word: varianceCents < 0 ? 'short' : 'over',
+    tone: 'text-amber-500',
+    off: true,
+  }
+}
+
+/** Cash movements as staff name them. `DROP` is a safe drop, not a deletion. */
+export const MOVEMENT_LABEL: Record<string, string> = {
+  PAID_IN: 'Paid in',
+  PAID_OUT: 'Paid out',
+  DROP: 'Safe drop',
+  /**
+   * The owner collecting the till. Named for what it is rather than "cash out": the drawer
+   * carries over between days, so this is the one movement that ENDS a balance, and it is
+   * admin-only to record.
+   */
+  PICKUP: 'Cash pickup',
+}

@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from '~/components/ui/select'
 import { ApiError, apiFetch } from '~/composables/useApi'
+import { MOVEMENT_LABEL, varianceView } from '~/lib/sale-format'
 import { useAuthStore } from '~/stores/auth'
 
 /**
@@ -79,17 +80,37 @@ function dollars(raw: string): number | null {
 const floatStr = ref('')
 const opening = ref(false)
 
+/**
+ * The opening count is a RECONCILIATION, not a float.
+ *
+ * Cash carries over between shifts and days — it only leaves when the owner collects it — so
+ * the drawer should already hold what the last close counted. Counting it is the only control
+ * on money going missing while nobody was serving, and before 2026-08-22 there was none: the
+ * register accepted whatever was typed and recorded no variance at all.
+ *
+ * BLIND, like the close: the expected figure is never on screen before the count. The reveal
+ * is the open RESPONSE, so no separate endpoint is needed to leak it early.
+ *
+ * Kasan's R2 pick: a matching count costs no extra tap, and a mismatch takes the screen. The
+ * asymmetry is deliberate — a match has no action attached to it, and a mismatch cannot be
+ * FIXED by the cashier either, so what it needs is an acknowledgement, not a form.
+ */
+const mismatch = ref<ShiftRow | null>(null)
+
 async function open() {
   const cents = dollars(floatStr.value)
   if (cents === null || opening.value) return
   opening.value = true
   error.value = null
   try {
-    shift.value = await apiFetch<ShiftRow>('/shifts/open', {
+    const opened = await apiFetch<ShiftRow>('/shifts/open', {
       method: 'POST',
       body: { openingCashCents: cents, ...(storeId.value ? { storeId: storeId.value } : {}) },
     })
+    shift.value = opened
     floatStr.value = ''
+    // Null variance is the first drawer a store ever opens — nothing to have matched.
+    if ((opened.openingVarianceCents ?? 0) !== 0) mismatch.value = opened
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : 'Something went wrong.'
   } finally {
@@ -97,9 +118,19 @@ async function open() {
   }
 }
 
+const openingView = computed(() =>
+  mismatch.value ? varianceView(mismatch.value.openingVarianceCents, 'CLOSED') : null,
+)
+
 /* ————— cash movements ————— */
 const moveOpen = ref(false)
-const moveType = ref<'PAID_IN' | 'PAID_OUT' | 'DROP'>('DROP')
+const moveType = ref<'PAID_IN' | 'PAID_OUT' | 'DROP' | 'PICKUP'>('DROP')
+/**
+ * A pickup is the owner emptying the till, and it is ADMIN-ONLY on the server: a cashier who
+ * could key "$500 pickup" could paper over a $500 shortfall. Hidden rather than disabled — an
+ * option staff can never choose is noise on a counter screen.
+ */
+const canRecordPickup = computed(() => auth.principal?.role === 'ADMIN')
 const moveAmount = ref('')
 const moveReason = ref('')
 const moving = ref(false)
@@ -153,15 +184,21 @@ async function submitClose() {
 }
 
 const fmt = (cents: number | null | undefined) => (cents == null ? '—' : formatCents(cents as Cents))
+
+/**
+ * Shared with the staff page and the drawer list — see `varianceView`. Only the TONE stays
+ * local: an exact count is worth a green line HERE, at the moment someone finishes counting,
+ * where a back-office list of mostly-exact drawers would just be a wall of green.
+ */
+const variance = computed(() =>
+  closedShift.value
+    ? varianceView(closedShift.value.varianceCents, closedShift.value.status)
+    : null,
+)
 const timeFmt = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' })
 const movementSum = (type: string) =>
   movements.value.filter((m) => m.type === type).reduce((sum, m) => sum + m.amountCents, 0)
 
-const MOVEMENT_LABEL: Record<string, string> = {
-  PAID_IN: 'Paid in',
-  PAID_OUT: 'Paid out',
-  DROP: 'Safe drop',
-}
 </script>
 
 <template>
@@ -179,7 +216,7 @@ const MOVEMENT_LABEL: Record<string, string> = {
       <div v-else-if="closedShift" class="flex w-full max-w-sm flex-col gap-3 rounded-2xl border bg-card p-5">
         <h1 class="text-lg font-bold tracking-tight">Shift closed</h1>
         <dl class="flex flex-col gap-1.5 text-sm">
-          <div class="flex justify-between"><dt class="text-muted-foreground">Opening float</dt><dd class="tabular-nums">{{ fmt(closedShift.openingCashCents) }}</dd></div>
+          <div class="flex justify-between"><dt class="text-muted-foreground">Carried in</dt><dd class="tabular-nums">{{ fmt(closedShift.openingCashCents) }}</dd></div>
           <div class="flex justify-between"><dt class="text-muted-foreground">Cash sales ({{ closedShift.saleCount }})</dt><dd class="tabular-nums">+{{ fmt(closedShift.cashSalesCents) }}</dd></div>
           <div v-if="closedShift.cashRefundsCents > 0" class="flex justify-between"><dt class="text-muted-foreground">Cash refunds</dt><dd class="tabular-nums text-destructive">−{{ fmt(closedShift.cashRefundsCents) }}</dd></div>
           <div class="flex justify-between"><dt class="text-muted-foreground">Paid in / out</dt><dd class="tabular-nums">+{{ fmt(movementSum('PAID_IN')) }} / −{{ fmt(movementSum('PAID_OUT')) }}</dd></div>
@@ -187,14 +224,12 @@ const MOVEMENT_LABEL: Record<string, string> = {
           <div class="flex justify-between border-t pt-2 font-semibold"><dt>Expected</dt><dd class="tabular-nums">{{ fmt(closedShift.expectedCashCents) }}</dd></div>
           <div class="flex justify-between font-semibold"><dt>You counted</dt><dd class="tabular-nums">{{ fmt(closedShift.closingCountedCashCents) }}</dd></div>
           <div
+            v-if="variance"
             class="flex justify-between text-base font-bold"
-            :class="(closedShift.varianceCents ?? 0) === 0 ? 'text-primary' : 'text-amber-500'"
+            :class="variance.off ? 'text-amber-500' : 'text-primary'"
           >
             <dt>Variance</dt>
-            <dd class="tabular-nums">
-              {{ (closedShift.varianceCents ?? 0) >= 0 ? '+' : '−' }}{{ fmt(Math.abs(closedShift.varianceCents ?? 0)) }}
-              {{ (closedShift.varianceCents ?? 0) === 0 ? 'exact' : (closedShift.varianceCents ?? 0) < 0 ? 'short' : 'over' }}
-            </dd>
+            <dd class="tabular-nums">{{ variance.amount }} {{ variance.word }}</dd>
           </div>
         </dl>
         <div
@@ -208,10 +243,42 @@ const MOVEMENT_LABEL: Record<string, string> = {
         <Button class="h-11 text-base" @click="closedShift = null">Done</Button>
       </div>
 
+      <!--
+        The opening count did not match what the last close left. Takes the screen because it
+        is the only moment anyone will look at it — but it never BLOCKS trading: the drawer is
+        already open and the gap is already recorded. All that is wanted is an acknowledgement.
+      -->
+      <div
+        v-else-if="mismatch && openingView"
+        class="flex w-full max-w-sm flex-col items-center gap-4 text-center"
+      >
+        <h1 class="text-2xl font-extrabold tracking-tight text-amber-500">
+          {{ openingView.amount }} {{ openingView.word }}
+        </h1>
+        <p class="text-sm text-muted-foreground">
+          You counted {{ fmt(mismatch.openingCashCents) }}. The last close left
+          {{ fmt(mismatch.openingExpectedCents) }}.
+        </p>
+        <div class="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-left text-sm">
+          <p class="font-semibold text-amber-500">Recount before you carry on.</p>
+          <p class="mt-1 text-muted-foreground">
+            If it still differs, this is recorded against the last close and your manager can
+            see it. You can keep trading either way.
+          </p>
+        </div>
+        <Button size="lg" class="h-12 w-full text-base font-bold" @click="mismatch = null">
+          I counted correctly — continue
+        </Button>
+      </div>
+
       <!-- no shift: open form -->
       <div v-else-if="!shift" class="flex w-full max-w-xs flex-col items-center gap-4 text-center">
         <h1 class="text-2xl font-extrabold tracking-tight">Open shift</h1>
-        <p class="text-sm text-muted-foreground">Count the opening float in the drawer.</p>
+        <!--
+          Not "float": the drawer carries over and should already hold what the last close
+          counted. The expected figure is deliberately NOT shown here — see `open()`.
+        -->
+        <p class="text-sm text-muted-foreground">Count what is in the drawer.</p>
         <!-- h-14 on the GROUP, not the control: InputGroup owns the border and defaults
              to h-8, so sizing the inner input leaves a 56px number in a 32px box. -->
         <InputGroup class="h-14 w-44">
@@ -222,7 +289,7 @@ const MOVEMENT_LABEL: Record<string, string> = {
             autocomplete="off"
             autofocus
             class="text-center text-2xl font-bold tabular-nums"
-            aria-label="Opening float in dollars"
+            aria-label="Cash counted in the drawer, in dollars"
             @keydown.enter.prevent="open"
           />
         </InputGroup>
@@ -241,8 +308,15 @@ const MOVEMENT_LABEL: Record<string, string> = {
               since {{ timeFmt.format(new Date(shift.openedAt)) }} · {{ shift.openedByName }}
             </span>
           </div>
+          <!-- One line, no tap: the whole reward for a count that agreed. -->
+          <p
+            v-if="shift.openingExpectedCents !== null && shift.openingVarianceCents === 0"
+            class="mt-2 text-xs font-medium text-primary"
+          >
+            ✓ {{ fmt(shift.openingCashCents) }} — matches the last close
+          </p>
           <dl class="mt-3 flex flex-col gap-1.5 text-sm">
-            <div class="flex justify-between"><dt class="text-muted-foreground">Opening float</dt><dd class="tabular-nums">{{ fmt(shift.openingCashCents) }}</dd></div>
+            <div class="flex justify-between"><dt class="text-muted-foreground">Carried in</dt><dd class="tabular-nums">{{ fmt(shift.openingCashCents) }}</dd></div>
             <div class="flex justify-between">
               <dt class="text-muted-foreground">Sales so far</dt>
               <dd class="tabular-nums">
@@ -299,6 +373,7 @@ const MOVEMENT_LABEL: Record<string, string> = {
                   <SelectItem value="PAID_IN">Paid in</SelectItem>
                   <SelectItem value="PAID_OUT">Paid out</SelectItem>
                   <SelectItem value="DROP">Safe drop</SelectItem>
+                  <SelectItem v-if="canRecordPickup" value="PICKUP">Cash pickup</SelectItem>
                 </SelectContent>
               </Select>
             </Field>

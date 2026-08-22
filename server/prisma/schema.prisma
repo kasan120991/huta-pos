@@ -116,6 +116,10 @@ enum CashMovementType {
   PAID_IN
   PAID_OUT
   DROP
+  /// The owner collecting the till. Subtracts from expected exactly as DROP does, but it is
+  /// the event that RESETS a carried-over drawer, and it is totalled separately — a safe
+  /// drop and an owner collection are different facts. Admin-only to write.
+  PICKUP
 }
 
 enum PromotionScope {
@@ -232,6 +236,7 @@ model User {
   purchaseOrdersCreated PurchaseOrder[]
   receiptsReceived      Receipt[]             @relation("ReceiptReceiver")
   receiptsReviewed      Receipt[]             @relation("ReceiptReviewer")
+  shiftsReviewed        Shift[]               @relation("ShiftReviewer")
   refundsIssued         Refund[]              @relation("RefundIssuer")
   refundsApproved       Refund[]              @relation("RefundApprover")
   promotionsCreated     Promotion[]
@@ -1102,7 +1107,16 @@ model Shift {
   openedById       String
   openedBy         User     @relation("ShiftOpener", fields: [openedById], references: [id], onDelete: Restrict)
   openedAt         DateTime @default(now())
+  /// What was COUNTED in the drawer at open. Cash carries over between shifts and days, so
+  /// this is a carried balance, not a float — it is only a float on the day a store opens.
   openingCashCents Int
+  /// What the previous close at this store left behind. NULL for the first drawer a store
+  /// ever opens, which is a different fact from zero.
+  openingExpectedCents Int?
+  /// counted - expected at OPEN. Kept apart from `varianceCents` on purpose: this one is
+  /// what happened while nobody was serving, and folding the two together would land an
+  /// overnight loss on whoever opened next.
+  openingVarianceCents Int?
 
   closedById              String?
   closedBy                User?     @relation("ShiftCloser", fields: [closedById], references: [id], onDelete: SetNull)
@@ -1117,6 +1131,15 @@ model Shift {
   status ShiftStatus @default(OPEN)
   notes  String?
 
+  /// Why the drawer was off. An admin writes it AFTER the close, so it is a separate record
+  /// from `notes`, which is what the cashier typed while counting — overwriting their words
+  /// with a manager's conclusion would destroy the more direct account of the two.
+  /// Re-posting amends; every version survives in AuditLog.
+  reviewedById String?
+  reviewedBy   User?     @relation("ShiftReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt   DateTime?
+  reviewNote   String?
+
   sales         Sale[]
   cashMovements CashMovement[]
   refunds       Refund[]
@@ -1125,6 +1148,8 @@ model Shift {
   @@index([storeId, openedAt])
   @@index([openedById, openedAt])
   @@index([closedById])
+  /// The review queue: off and not yet explained. Mirrors Receipt's variance index.
+  @@index([varianceCents, reviewedAt])
 }
 
 model CashMovement {

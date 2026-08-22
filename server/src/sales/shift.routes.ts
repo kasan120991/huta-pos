@@ -4,16 +4,18 @@ import { z } from 'zod'
 import { CASH_MOVEMENT_TYPE_VALUES } from '@huta/shared'
 
 import { scopeStoreId } from '../auth/permissions.js'
-import { requireAuth, requirePerson, requirePrincipal } from '../middleware/authenticate.js'
+import { requireAdmin, requireAuth, requirePerson, requirePrincipal } from '../middleware/authenticate.js'
 import { validateBody, validateParams, validateQuery, validatedQuery } from '../middleware/validate.js'
 import {
   addCashMovement,
   closeShift,
   currentShift,
-  listShifts,
   getShift,
   listCashMovements,
+  listShifts,
+  liveDrawers,
   openShift,
+  reviewShift,
 } from './shift.service.js'
 
 /**
@@ -35,15 +37,43 @@ const idParam = z.object({ id: z.cuid() })
  */
 const shiftListQuery = z.object({
   storeId: z.cuid().optional(),
-  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  // `z.iso.date()`, not a hand-rolled regex: the regex this replaced accepted `2026-99-99`.
+  from: z.iso.date().optional(),
+  to: z.iso.date().optional(),
   userId: z.cuid().optional(),
 })
 
-shiftRouter.get('/', async (req, res) => {
-  const filter = shiftListQuery.parse(req.query)
-  res.json({ shifts: await listShifts(requirePrincipal(req), filter) })
-})
+/**
+ * `requireAuth, requirePerson` were missing here while every sibling carried them. A bare
+ * terminal was already refused one layer down by `assertCan(…, 'shift.manage')`, so nothing
+ * leaked — but a money read should not depend on a service check to decide that an
+ * unattended register may not ask.
+ */
+shiftRouter.get(
+  '/',
+  requireAuth,
+  requirePerson,
+  validateQuery(shiftListQuery),
+  async (req, res) => {
+    const filter = validatedQuery<z.infer<typeof shiftListQuery>>(req)
+    res.json(await listShifts(requirePrincipal(req), filter))
+  },
+)
+
+/**
+ * Live till balances across every store in scope. Declared with the other literals, above
+ * '/:id'. Serves `/admin/drawers` today and the dashboard when it is built.
+ */
+shiftRouter.get(
+  '/live',
+  requireAuth,
+  requirePerson,
+  validateQuery(storeQuery),
+  async (req, res) => {
+    const query = validatedQuery<z.infer<typeof storeQuery>>(req)
+    res.json({ drawers: await liveDrawers(requirePrincipal(req), query.storeId) })
+  },
+)
 
 shiftRouter.get('/current', requireAuth, requirePerson, validateQuery(storeQuery), async (req, res) => {
   const principal = requirePrincipal(req)
@@ -104,6 +134,24 @@ shiftRouter.post(
         reason: body.reason,
       }),
     )
+  },
+)
+
+const reviewBody = z.object({ note: z.string().trim().min(1).max(500) })
+
+/**
+ * Explain a variance. Admin only — staff hold `shift.manage` because they open and close
+ * drawers, which is not the authority to pronounce on a shortfall. Re-posting amends.
+ */
+shiftRouter.post(
+  '/:id/review',
+  requireAuth,
+  requireAdmin,
+  validateParams(idParam),
+  validateBody(reviewBody),
+  async (req, res) => {
+    const body = req.body as z.infer<typeof reviewBody>
+    res.json(await reviewShift(requirePrincipal(req), req.params['id'] as string, body.note))
   },
 )
 

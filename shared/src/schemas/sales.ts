@@ -39,14 +39,52 @@ export interface ShiftListRow {
   readonly storeName: string
   readonly status: ShiftStatus
   readonly openedAt: string
+  /** Ids as well as names: matching a person by their FORMATTED NAME breaks on a namesake. */
+  readonly openedById: string
   readonly openedByName: string
   readonly closedAt: string | null
+  readonly closedById: string | null
   readonly closedByName: string | null
   readonly openingCashCents: number
   readonly closingCountedCashCents: number | null
   readonly expectedCashCents: number | null
   readonly varianceCents: number | null
   readonly saleCount: number
+  /** The admin's account of why the drawer was off. Null until someone explains it. */
+  readonly reviewedAt: string | null
+  readonly reviewedByName: string | null
+  readonly reviewNote: string | null
+  /**
+   * The opening reconciliation. Cash carries over, so an opening count is a check against the
+   * previous close — and its variance is what happened while NOBODY was serving. Kept apart
+   * from `varianceCents` on purpose: folding them together lands an overnight loss on
+   * whoever opened next. Both null for the first drawer a store ever opens.
+   */
+  readonly openingExpectedCents: number | null
+  readonly openingVarianceCents: number | null
+  /**
+   * Cash the owner collected off this drawer. On the row because under carry-over a pickup is
+   * the only thing that legitimately empties a till — without it a balance dropping by $800
+   * looks exactly like $800 going missing.
+   */
+  readonly pickupsCents: number
+}
+
+/**
+ * The drawer list envelope.
+ *
+ * Carries the `timezone` its days were cut in, exactly as `SalesTotals` does — without it a
+ * client grouping rows into days would use the BROWSER's zone and disagree with the very
+ * filter that fetched them.
+ */
+export interface ShiftListPage {
+  readonly shifts: ShiftListRow[]
+  readonly timezone: string
+}
+
+/** An admin's explanation of a variance. The note is required — that is the whole point. */
+export interface ShiftReviewInput {
+  readonly note: string
 }
 
 export interface ShiftRow {
@@ -75,6 +113,32 @@ export interface ShiftRow {
   /** Cash paid OUT of this shift's drawer as refunds (by the refund's shift, not the
    *  sale's — a Tuesday refund of a Monday sale hits Tuesday's drawer). */
   readonly cashRefundsCents: number
+  /** The admin's account of why the drawer was off, so the detail view is self-sufficient. */
+  readonly reviewedAt: string | null
+  readonly reviewedByName: string | null
+  readonly reviewNote: string | null
+  /** What the previous close left, and how the opening count compared. See `ShiftListRow`. */
+  readonly openingExpectedCents: number | null
+  readonly openingVarianceCents: number | null
+}
+
+/**
+ * What one store's till holds right now — the dashboard figure.
+ *
+ * A store with no open drawer is REPORTED with nulls rather than omitted: "the till is empty"
+ * and "nobody has opened up" are different facts, and only the second needs someone to act.
+ */
+export interface LiveDrawerRow {
+  readonly storeId: string
+  readonly storeName: string
+  readonly shiftId: string | null
+  readonly openedAt: string | null
+  readonly openedByName: string | null
+  readonly openingCashCents: number | null
+  readonly cashSalesCents: number | null
+  /** Opening + cash sales + paid in − paid out − drops − pickups − cash refunds. */
+  readonly balanceCents: number | null
+  readonly saleCount: number | null
 }
 
 export interface CashMovementRow {
@@ -395,4 +459,6 @@ export interface SalesHistoryQuery {
   readonly status?: SaleStatus | undefined
   readonly method?: PaymentMethod | undefined
   readonly number?: number | undefined
+  /** Every sale rung on one cash drawer — what the drawer list links through to. */
+  readonly shiftId?: string | undefined
 }

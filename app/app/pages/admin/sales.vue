@@ -72,6 +72,8 @@ const cashierId = ref<string | undefined>(undefined)
 const method = ref<'CASH' | 'CARD' | undefined>(undefined)
 const status = ref<string | undefined>(undefined)
 const numberTerm = ref('')
+/** One cash drawer, arrived at from /admin/drawers. */
+const shiftId = ref<string | undefined>(undefined)
 const page = ref(1)
 const selectedId = ref<string | null>(null)
 
@@ -114,6 +116,12 @@ const filters = computed(() => {
   if (searchingNumber.value) {
     return { storeId: storeId.value, number: Number(numberTerm.value.trim()) }
   }
+  /**
+   * A drawer escapes the date chips, exactly as a receipt number does. Two of these shifts
+   * ran over 24 hours and the default preset is TODAY, so honouring the range here would
+   * show a slice of the drawer — or nothing at all — under a heading naming the whole thing.
+   */
+  if (shiftId.value) return { shiftId: shiftId.value }
   return {
     storeId: storeId.value,
     cashierId: cashierId.value,
@@ -139,6 +147,7 @@ function applyFromQuery() {
   method.value = str('method') as 'CASH' | 'CARD' | undefined
   status.value = str('status')
   numberTerm.value = str('number') ?? ''
+  shiftId.value = str('shift')
   page.value = Number(str('page') ?? '1') || 1
   selectedId.value = str('sale') ?? null
 
@@ -170,6 +179,7 @@ function writeQuery() {
       method: method.value,
       status: status.value,
       number: numberTerm.value.trim() || undefined,
+      shift: shiftId.value,
       page: page.value > 1 ? String(page.value) : undefined,
       sale: selectedId.value ?? undefined,
     },
@@ -423,6 +433,28 @@ const netOf = (row: SaleHistoryRow) => row.totalCents - row.refundedCents
     <p v-if="searchingNumber" class="-mt-2 text-xs text-muted-foreground">
       Searching every day, not just the selected range.
     </p>
+
+    <!--
+      A drawer filter overrides the chips above it, so it has to SAY so and offer a way out —
+      otherwise the date range reads as active while being ignored.
+    -->
+    <div
+      v-if="shiftId"
+      class="-mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-primary/40 bg-primary/5 px-3 py-2 text-xs"
+    >
+      <span>Showing one cash drawer — every sale rung on it, whatever day it fell on.</span>
+      <Button
+        variant="ghost"
+        size="sm"
+        class="h-6 px-2 text-xs"
+        @click="() => { shiftId = undefined; resetPageAndSync() }"
+      >
+        Clear
+      </Button>
+      <Button as-child variant="ghost" size="sm" class="h-6 px-2 text-xs">
+        <NuxtLink :to="`/admin/drawers?drawer=${shiftId}`">Back to the drawer</NuxtLink>
+      </Button>
+    </div>
 
     <!-- totals: the SAME filters as the table below, never a different scope -->
     <div v-if="totals" class="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">

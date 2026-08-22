@@ -135,6 +135,8 @@ const historyQuery = z.object({
   status: z.enum(SALE_STATUS_VALUES as [string, ...string[]]).optional(),
   method: z.enum(['CASH', 'CARD']).optional(),
   number: z.coerce.number().int().positive().optional(),
+  /** Every sale rung on one cash drawer — the drawer list's drill-through. */
+  shiftId: z.cuid().optional(),
 })
 
 const historyPageQuery = historyQuery.extend({

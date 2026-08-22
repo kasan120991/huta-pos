@@ -12,7 +12,7 @@ import { setPaymentProvider } from '../../src/payments/provider.js'
 import { listSales, salesTotals } from '../../src/sales/history.service.js'
 import { refundSale, voidSale } from '../../src/sales/refund.service.js'
 import { checkout, createSaleIntent, getSale } from '../../src/sales/sales.service.js'
-import { openShift } from '../../src/sales/shift.service.js'
+import { closeShift, liveDrawers, openShift } from '../../src/sales/shift.service.js'
 import { findCostKeys } from '../setup/cost-keys.js'
 import {
   giveStock,
@@ -315,6 +315,37 @@ describe('totals arithmetic', () => {
   })
 })
 
+/**
+ * The live till balance, exercised with REAL takings.
+ *
+ * It lives here rather than beside the other drawer tests because this is the file that can
+ * actually ring a sale — and the cash figure is the one part of `liveDrawers` that needs one.
+ * It is served by a raw SQL join (Prisma cannot `groupBy` a relation field), so without a
+ * sale on the drawer neither the join nor the bigint SUM it returns is ever executed.
+ */
+describe('live till balance', () => {
+  it('counts the cash actually taken, and agrees with the close that follows', async () => {
+    const variant = await eachProduct(storeA.id)
+    await cashSale(staffA, variant.id)
+    await cashSale(staffA, variant.id)
+    // A card sale must NOT reach the drawer — card money never enters the till.
+    await splitSale(staffA, variant.id, 0)
+
+    const rows = await liveDrawers(admin)
+    const main = rows.find((r) => r.storeId === storeA.id)
+
+    expect(main?.saleCount).toBe(3)
+    expect(main?.cashSalesCents).toBeGreaterThan(0)
+    expect(main?.balanceCents).toBe(100_00 + (main?.cashSalesCents ?? 0))
+
+    // The live figure is the one the drawer will be measured against — not a second opinion.
+    const shiftId = main?.shiftId as string
+    const closed = await closeShift(staffA, shiftId, { countedCashCents: main?.balanceCents ?? 0 })
+    expect(closed.expectedCashCents).toBe(main?.balanceCents)
+    expect(closed.varianceCents).toBe(0)
+  })
+})
+
 describe('filters and paging', () => {
   it('isolates by cashier, status and payment method', async () => {
     const variant = await eachProduct(storeA.id)
@@ -329,6 +360,31 @@ describe('filters and paging', () => {
       (await listSales(admin, { storeId: storeA.id, cashierId: staffA.userId }, PAGE)).total,
     ).toBe(2)
     expect((await listSales(admin, { cashierId: adminUser.id }, PAGE)).total).toBe(0)
+  })
+
+  /**
+   * The drawer list's drill-through: "this till was $100 short — what was rung on it?"
+   *
+   * Two stores each have an open drawer here, so this also proves the filter is not simply
+   * agreeing with the store scope by accident.
+   */
+  it('isolates the sales rung on ONE cash drawer', async () => {
+    const a = await eachProduct(storeA.id)
+    const b = await eachProduct(storeB.id)
+    await cashSale(staffA, a.id)
+    await cashSale(staffA, a.id)
+    await cashSale(staffB, b.id)
+
+    const drawerA = await prisma.shift.findFirstOrThrow({ where: { storeId: storeA.id } })
+    const drawerB = await prisma.shift.findFirstOrThrow({ where: { storeId: storeB.id } })
+
+    expect((await listSales(admin, { shiftId: drawerA.id }, PAGE)).total).toBe(2)
+    expect((await listSales(admin, { shiftId: drawerB.id }, PAGE)).total).toBe(1)
+
+    // The totals share `saleWhere`, so the strip above the drill-through cannot describe a
+    // different set than the rows below it.
+    const totals = await salesTotals(admin, { shiftId: drawerB.id })
+    expect(totals.saleCount).toBe(1)
   })
 
   it('returns a receipt number from EVERY store when no store is named', async () => {

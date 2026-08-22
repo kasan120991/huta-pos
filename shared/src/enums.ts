@@ -127,6 +127,8 @@ export const CashMovementType = {
   PAID_IN: 'PAID_IN',
   PAID_OUT: 'PAID_OUT',
   DROP: 'DROP',
+  /** The owner collecting the till — the event that resets a carried-over drawer. */
+  PICKUP: 'PICKUP',
 } as const
 export type CashMovementType = (typeof CashMovementType)[keyof typeof CashMovementType]
 export const CASH_MOVEMENT_TYPE_VALUES = Object.values(

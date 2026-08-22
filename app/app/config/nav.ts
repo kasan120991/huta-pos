@@ -1,5 +1,5 @@
 import type { Component } from 'vue'
-import { ArrowLeftRight, ClipboardList, Inbox, LayoutGrid, MonitorSmartphone, Package, ReceiptText, Scale, Tag, Truck, Users } from '@lucide/vue'
+import { ArrowLeftRight, Banknote, ClipboardList, Inbox, LayoutGrid, MonitorSmartphone, Package, ReceiptText, Scale, Tag, Truck, Users } from '@lucide/vue'
 
 /**
  * The back-office nav, defined ONCE. The sidebar renders it and the topbar breadcrumb
@@ -29,7 +29,12 @@ export const NAV: NavGroup[] = [
     // Called Sales, not Reports: naming it Reports would promise the Phase-12 margin,
     // supplier and valuation dashboards, which this is not.
     label: 'Sales',
-    items: [{ title: 'History', to: '/admin/sales', icon: ReceiptText }],
+    items: [
+      { title: 'History', to: '/admin/sales', icon: ReceiptText },
+      // Drawers file under Sales, not Store: a till is money accountability, while the Store
+      // group is devices and people.
+      { title: 'Drawers', to: '/admin/drawers', icon: Banknote },
+    ],
   },
   {
     label: 'Products',

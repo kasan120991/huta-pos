@@ -54,8 +54,10 @@ export async function resetDatabase(): Promise<void> {
   await prisma.$executeRawUnsafe(resetStatement)
 }
 
-export async function makeStore(name: string, slug: string) {
-  return prisma.store.create({ data: { name, slug, taxRateBps: 400 } })
+export async function makeStore(name: string, slug: string, timezone?: string) {
+  return prisma.store.create({
+    data: { name, slug, taxRateBps: 400, ...(timezone ? { timezone } : {}) },
+  })
 }
 
 export async function makeAdmin(email = 'admin@test.local', password = 'test-password') {

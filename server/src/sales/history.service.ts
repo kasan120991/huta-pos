@@ -8,9 +8,9 @@ import type {
 
 import { assertCan } from '../auth/permissions.js'
 import type { Principal } from '../auth/principal.js'
-import type { ScopeStore } from '../auth/store-scope.js'
 import { resolveMoneyStores } from '../auth/store-scope.js'
 import { prisma } from '../db/client.js'
+import { dayKey, dayRange, scopeTimezone } from '../lib/business-day.js'
 import { NotFoundError } from '../errors/index.js'
 import type { Prisma } from '../generated/prisma/client.js'
 
@@ -37,73 +37,6 @@ import type { Prisma } from '../generated/prisma/client.js'
 const resolveHistoryStores = (principal: Principal, storeId: string | undefined) =>
   resolveMoneyStores(principal, storeId, 'sale.ring')
 
-function scopeTimezone(stores: readonly ScopeStore[]): string {
-  const first = stores[0]?.timezone ?? 'UTC'
-  return stores.every((s) => s.timezone === first) ? first : first
-}
-
-/** The offset of `timeZone` from UTC at a given instant, in milliseconds. */
-function zoneOffsetMs(at: Date, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hour12: false,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).formatToParts(at)
-  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0')
-  // `hour` comes back as 24 at midnight under hour12:false in some ICU builds.
-  const hour = get('hour') % 24
-  const asIfUtc = Date.UTC(get('year'), get('month') - 1, get('day'), hour, get('minute'), get('second'))
-  return asIfUtc - at.getTime()
-}
-
-/**
- * The instant midnight local to `timeZone` on `YYYY-MM-DD`.
- *
- * Two passes, not one: the offset is looked up AT the guessed instant, and on a DST
- * transition day the guess can sit on the wrong side of the change. Re-reading the offset
- * after correcting settles it.
- */
-function zonedStartOfDay(date: string, timeZone: string, addDays = 0): Date {
-  const [year, month, day] = date.split('-').map(Number) as [number, number, number]
-  const naive = Date.UTC(year, month - 1, day + addDays, 0, 0, 0)
-  let instant = new Date(naive - zoneOffsetMs(new Date(naive), timeZone))
-  instant = new Date(naive - zoneOffsetMs(instant, timeZone))
-  return instant
-}
-
-/** `YYYY-MM-DD` local to `timeZone`. en-CA formats exactly that way. */
-function dayKey(at: Date, timeZone: string): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(at)
-}
-
-/**
- * HALF-OPEN, deliberately: `[from 00:00, to+1 day 00:00)`.
- *
- * `to` names a whole business day, so a `lte` against the midnight instant would drop every
- * sale rung after midnight on that day — i.e. almost all of them. This is the classic
- * off-by-a-day and it is invisible until someone reconciles a total.
- */
-function dateRange(
-  filter: SalesHistoryQuery,
-  timeZone: string,
-): { gte?: Date, lt?: Date } | undefined {
-  if (filter.from === undefined && filter.to === undefined) return undefined
-  return {
-    ...(filter.from !== undefined ? { gte: zonedStartOfDay(filter.from, timeZone) } : {}),
-    ...(filter.to !== undefined ? { lt: zonedStartOfDay(filter.to, timeZone, 1) } : {}),
-  }
-}
-
 /**
  * The Sale predicate, built ONCE and reused by the list, the counts and the day buckets.
  *
@@ -117,7 +50,7 @@ function saleWhere(
   timeZone: string,
   opts: { omitCashier?: boolean, omitDate?: boolean } = {},
 ): Prisma.SaleWhereInput {
-  const range = opts.omitDate === true ? undefined : dateRange(filter, timeZone)
+  const range = opts.omitDate === true ? undefined : dayRange(filter.from, filter.to, timeZone)
   return {
     storeId: { in: [...storeIds] },
     ...(filter.number !== undefined ? { number: filter.number } : {}),
@@ -125,6 +58,9 @@ function saleWhere(
       ? { cashierId: filter.cashierId }
       : {}),
     ...(filter.status !== undefined ? { status: filter.status } : {}),
+    // One drawer's sales. `omitDate` does not apply — a shift is already a bounded span,
+    // and the drawer list passes no range alongside it.
+    ...(filter.shiftId !== undefined ? { shiftId: filter.shiftId } : {}),
     // "Was this paid by card" is a fact about SUCCEEDED payments — a failed card attempt
     // must not make a sale match the Card filter.
     ...(filter.method !== undefined
@@ -229,7 +165,7 @@ export async function salesTotals(
   const timeZone = scopeTimezone(stores)
   const storeIds = stores.map((s) => s.id)
   const where = saleWhere(storeIds, filter, timeZone)
-  const range = dateRange(filter, timeZone)
+  const range = dayRange(filter.from, filter.to, timeZone)
 
   /**
    * Refunds split their two questions deliberately:

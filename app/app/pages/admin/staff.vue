@@ -70,6 +70,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '~/components/ui/tabs'
 import { Toggle } from '~/components/ui/toggle'
 import { ToggleGroup, ToggleGroupItem } from '~/components/ui/toggle-group'
 import { ApiError, apiFetch } from '~/composables/useApi'
+import { money, varianceView } from '~/lib/sale-format'
 import { Clock, UserX } from '@lucide/vue'
 
 /**
@@ -375,12 +376,9 @@ const timeline = computed<TimelineItem[]>(() => {
     for (const d of drawers.value) {
       const opened = d.openedByName === fullNameOf(id)
       const closed = d.closedByName !== null && d.closedByName === fullNameOf(id)
-      const variance
-        = d.varianceCents === null
-          ? d.status === 'OPEN' ? 'still open' : 'no variance recorded'
-          : d.varianceCents === 0
-            ? '$0.00'
-            : `${d.varianceCents > 0 ? '+' : '−'}${money(Math.abs(d.varianceCents))}`
+      // One vocabulary with the register and the drawer list — see `varianceView`.
+      const v = varianceView(d.varianceCents, d.status)
+      const variance = v.off ? `${v.amount} ${v.word}` : v.word === 'exact' ? v.amount : v.word
       items.push({
         id: `shift-${d.id}`,
         // Dated by the end of their involvement, so a drawer they closed sorts where they
@@ -393,7 +391,7 @@ const timeline = computed<TimelineItem[]>(() => {
             ? `Opened the ${d.storeName} drawer`
             : `Closed the ${d.storeName} drawer`,
         detail: `${d.saleCount} ${d.saleCount === 1 ? 'sale' : 'sales'} · ${variance}`,
-        short: (d.varianceCents ?? 0) < 0,
+        short: v.off,
       })
     }
   }
@@ -435,7 +433,6 @@ const fullNameOf = (id: string | null) => {
   return p ? `${p.firstName} ${p.lastName}` : ''
 }
 
-const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
 
 /**
  * `catalog.variant.update` reads as machinery. This turns the dotted action into something

@@ -25,7 +25,7 @@ const MIRRORS = [
   ['PaymentMethod', E.PaymentMethod, ['CASH', 'CARD']],
   ['PaymentStatus', E.PaymentStatus, ['PENDING', 'SUCCEEDED', 'FAILED', 'CANCELLED']],
   ['ShiftStatus', E.ShiftStatus, ['OPEN', 'CLOSED']],
-  ['CashMovementType', E.CashMovementType, ['PAID_IN', 'PAID_OUT', 'DROP']],
+  ['CashMovementType', E.CashMovementType, ['PAID_IN', 'PAID_OUT', 'DROP', 'PICKUP']],
   ['PromotionScope', E.PromotionScope, ['VARIANT', 'PRODUCT', 'CATEGORY', 'PRICE_GROUP']],
   [
     'DiscountType',
