@@ -386,6 +386,11 @@ describe('updateVariant', () => {
     await expect(
       updateVariant(admin, two.variants[0]!.id, { barcode: '012345678905' }),
     ).rejects.toThrow(ConflictError)
+    // The message must NAME the owner: someone tagging a shelf with a scanner needs to know
+    // which item already holds the code, not merely that something does.
+    await expect(
+      updateVariant(admin, two.variants[0]!.id, { barcode: '012345678905' }),
+    ).rejects.toThrow(/already on Gummies/)
   })
 
   it('refuses a minimum sale quantity above the maximum', async () => {

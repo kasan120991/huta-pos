@@ -460,11 +460,17 @@ async function assertVariantUniqueness(
     if (clash) throw new ConflictError('That SKU already exists in the catalog.')
   }
   if (barcode != null && barcode !== currentBarcode) {
+    // Name what it collided with. "That barcode already exists" is unusable to someone
+    // working through a shelf with a scanner — the whole question is which item already
+    // owns it, and the answer is one join away.
     const clash = await prisma.productVariant.findUnique({
       where: { barcode },
-      select: { id: true },
+      select: { label: true, product: { select: { name: true } } },
     })
-    if (clash) throw new ConflictError('That barcode already exists in the catalog.')
+    if (clash) {
+      const owner = clash.label ? `${clash.product.name} · ${clash.label}` : clash.product.name
+      throw new ConflictError(`That barcode is already on ${owner}.`)
+    }
   }
 }
 

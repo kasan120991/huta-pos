@@ -341,6 +341,25 @@ const drawerSubtitle = computed(() => {
   return parts.filter(Boolean).join(' · ')
 })
 
+/* ————— TEMPORARY: the barcode-tagging drive (Kasan, 2026-08-22) —————
+ * 309 of 313 active variants have no barcode. Remove this block, the button in the pinned
+ * bar, and <RegisterSaveBarcodeDialog> once the shelf is tagged.
+ *
+ * Admin-only because the server says so: PATCH /catalog/variants/:id is requireAdmin +
+ * catalog.manage. Hidden rather than disabled — a control staff can never use is noise on
+ * a counter screen.
+ */
+const barcodeOpen = ref(false)
+const canTagBarcodes = computed(
+  () => auth.isAdmin && (detail.value?.variants ?? []).some((v) => !v.barcode),
+)
+
+async function onBarcodeSaved() {
+  // Refetch so the button disappears when the last variant is tagged, and so the payload
+  // the dialog reads stops disagreeing with the database.
+  if (detail.value) await select(detail.value.id)
+}
+
 function ringUp(variantId: string) {
   if (!detail.value) return
   void router.push({
@@ -680,7 +699,16 @@ const detailImage = computed(() => {
           </div>
 
           <!-- ZONE 3 — pinned. One target, same place, every product. -->
-          <div v-if="selectedVariant" class="shrink-0 border-t p-4">
+          <div v-if="selectedVariant" class="flex shrink-0 flex-col gap-2 border-t p-4">
+            <!-- TEMPORARY: barcode-tagging drive. See `barcodeOpen` in the script. -->
+            <Button
+              v-if="canTagBarcodes"
+              variant="outline"
+              class="h-11 w-full border-dashed"
+              @click="barcodeOpen = true"
+            >
+              Save barcode
+            </Button>
             <Button class="h-12 w-full text-base font-bold" @click="ringUp(selectedVariant.id)">
               Ring it up →
             </Button>
@@ -689,5 +717,12 @@ const detailImage = computed(() => {
       </aside>
     </div>
 
+    <!-- TEMPORARY: barcode-tagging drive — delete with the button above. -->
+    <RegisterSaveBarcodeDialog
+      :open="barcodeOpen"
+      :product="detail"
+      @close="barcodeOpen = false"
+      @saved="onBarcodeSaved"
+    />
   </div>
 </template>
