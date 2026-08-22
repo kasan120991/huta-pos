@@ -194,6 +194,25 @@ const brokenImages = ref(new Set<string>())
 const qty = (base: number, mode: CatalogVariant['trackingMode']) =>
   formatQuantity(base as BaseQuantity, mode)
 
+/**
+ * What THIS store holds, for the card's stock line.
+ *
+ * The list is fetched store-scoped (`storeId: terminal.store.id`), so `byStore` carries
+ * exactly one row — this one. That is deliberate and must stay: dropping the scope to get
+ * the other store's figure too would also change what `stock.status` means, and the house rules
+ * is explicit that the badges on this screen mean "out HERE". Cross-store belongs to the
+ * inspector, which fetches WITHOUT a store scope for exactly that reason.
+ *
+ * Null when the product mixes EACH and WEIGHT variants — a summed quantity across a gummy
+ * and a gram is meaningless, and the payload already refuses to invent one.
+ */
+function hereQty(product: CatalogProduct): string | null {
+  if (product.stock.trackingMode === null || product.stock.quantityBase === null) return null
+  const row = product.stock.byStore.find((r) => r.storeId === hereId.value)
+  if (!row) return null
+  return qty(row.quantityBase, product.stock.trackingMode)
+}
+
 /* ————— the inspector ————— */
 const detail = ref<CatalogProductDetail | null>(null)
 const loadingDetail = ref(false)
@@ -319,43 +338,78 @@ const detailImage = computed(() => {
               <EmptyDescription>Try another search, or remove a chip.</EmptyDescription>
             </EmptyHeader>
           </Empty>
-          <div class="grid grid-cols-2 gap-2.5 xl:grid-cols-3">
+          <!--
+            Card 3 (Kasan, 2026-08-22): type-led, photo as a corner mark.
+
+            This is a LOOKUP screen, so the name and the price are what is being read and
+            they get the size. The photo shrinks to a 34px square confirmation mark — which
+            also fixes the crop: every source image here is 1200×1200, and the old
+            full-width 80px band was a 5.5:1 slot that `object-cover` reduced to an 18%
+            horizontal strip through the middle.
+
+            The bigger reason for the shrink is that only 75 of 286 products HAVE a photo.
+            The old card made the missing-image state the loudest thing on it — a wide grey
+            slab holding one letter, on three cards out of four. Here the empty slot is a
+            quiet dashed square, so the majority state is the calm one.
+          -->
+          <div class="grid grid-cols-2 gap-2.5 lg:grid-cols-3 xl:grid-cols-4">
             <button
               v-for="product in products"
               :key="product.id"
               type="button"
-              class="flex flex-col gap-1.5 rounded-2xl border bg-card p-3 text-left transition-colors"
+              class="flex min-h-[86px] flex-col gap-1.5 rounded-2xl border bg-card p-3 text-left transition-colors"
               :class="detail?.id === product.id ? 'border-primary/50 bg-primary/8' : 'hover:border-primary/40 hover:bg-accent/40'"
               @click="select(product.id)"
             >
-              <span class="flex h-20 items-center justify-center overflow-hidden rounded-xl bg-accent/60">
-                <img
+              <span class="flex items-start gap-2">
+                <span class="line-clamp-2 flex-1 text-sm font-bold leading-tight tracking-tight">
+                  {{ product.name }}
+                </span>
+                <span
                   v-if="product.imageUrl && !brokenImages.has(product.imageUrl)"
-                  :src="product.imageUrl"
-                  :alt="product.name"
-                  class="h-full w-full object-cover"
-                  loading="lazy"
-                  @error="brokenImages.add(product.imageUrl)"
-                />
-                <span v-else class="text-2xl font-extrabold text-muted-foreground/50">
+                  class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-accent/60"
+                >
+                  <img
+                    :src="product.imageUrl"
+                    :alt="product.name"
+                    class="size-full object-cover"
+                    loading="lazy"
+                    @error="brokenImages.add(product.imageUrl)"
+                  />
+                </span>
+                <span
+                  v-else
+                  class="flex size-9 shrink-0 items-center justify-center rounded-lg border border-dashed text-xs font-bold text-muted-foreground/40"
+                  aria-hidden="true"
+                >
                   {{ product.name.charAt(0) }}
                 </span>
               </span>
-              <span class="flex items-start justify-between gap-2">
-                <span class="line-clamp-2 text-sm font-semibold leading-snug">{{ product.name }}</span>
-                <span
-                  v-if="STATUS_BADGE[product.stock.status]"
-                  class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
-                  :class="STATUS_BADGE[product.stock.status]!.class"
-                >
-                  {{ STATUS_BADGE[product.stock.status]!.label }}
-                </span>
-              </span>
+
               <span class="truncate text-xs text-muted-foreground">
                 {{ [product.brand?.name, ...product.cannabinoids.slice(0, 2).map(potencyLabel)].filter(Boolean).join(' · ') || product.category.name }}
               </span>
-              <span class="mt-auto text-sm font-bold tabular-nums text-primary">
-                {{ productPriceText(product) }}
+
+              <span class="mt-auto flex items-end justify-between gap-2 pt-0.5">
+                <span class="text-base font-extrabold tracking-tight tabular-nums text-primary">
+                  {{ productPriceText(product) }}
+                </span>
+                <!--
+                  LOW carries the figure with it: "Low" alone is less useful than "Low · 2",
+                  and low stock is exactly when the number is worth knowing. OUT does not —
+                  the quantity is zero and the badge already says so.
+                -->
+                <span
+                  v-if="STATUS_BADGE[product.stock.status]"
+                  class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums"
+                  :class="STATUS_BADGE[product.stock.status]!.class"
+                >
+                  {{ STATUS_BADGE[product.stock.status]!.label
+                  }}<template v-if="product.stock.status === 'LOW' && hereQty(product)"> · {{ hereQty(product) }}</template>
+                </span>
+                <span v-else-if="hereQty(product)" class="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                  {{ hereQty(product) }} here
+                </span>
               </span>
             </button>
           </div>
