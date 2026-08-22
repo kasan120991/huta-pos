@@ -1,0 +1,19 @@
+{
+  /*
+   * Extends the config Nuxt GENERATES, not the repo's tsconfig.base.json.
+   *
+   * The base config is Node-flavoured — `lib: ["ES2023"]` with no DOM, and
+   * `moduleResolution: NodeNext` — which fights Vite and leaves `document` and `window`
+   * undefined. Nuxt's generated config supplies the DOM libs, bundler resolution and the
+   * auto-import types. The house-style strictness is re-declared below instead of
+   * inherited.
+   */
+  "extends": "./.nuxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}

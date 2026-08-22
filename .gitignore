@@ -1,0 +1,44 @@
+node_modules/
+dist/
+.output/
+.nuxt/
+.nitro/
+.cache/
+coverage/
+
+# Environment — never commit. Use the .env.example files as the template.
+.env
+.env.*
+!.env.example
+
+# Prisma generated client
+server/src/generated/
+
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# Build output
+shared/dist/
+server/dist/
+*.tsbuildinfo
+server/tmp/
+
+# ── TLS dev certificates — PRIVATE KEYS, never commit ────────────────────────────
+# app/.certs holds ca.key and dev.key. House rule: "NEVER commit .certs — the keys are
+# local secrets." Regenerate with openssl if the Mac's LAN IP changes.
+app/.certs/
+
+# Session scratch from browser automation (screenshots, console logs)
+.playwright-mcp/
+
+# Loose screenshots dropped at the repo root during design passes
+/*.png
+
+# Machine-local editor/tooling settings (permission allowlist). A shared
+# .claude/settings.json would be tracked; this one is per-machine.
+.claude/settings.local.json
+
+# Left untracked at Kasan's request, 2026-08-22.
+the house rules

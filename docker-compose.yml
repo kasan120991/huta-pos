@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: huta-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: huta
+      POSTGRES_PASSWORD: huta
+      POSTGRES_DB: huta_pos
+    # Host port 55432 so this never collides with a native Postgres on 5432.
+    # PhpStorm connects to localhost:55432 exactly as it would a local install.
+    ports:
+      - '55432:5432'
+    volumes:
+      - huta-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U huta -d huta_pos']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  huta-pg-data:

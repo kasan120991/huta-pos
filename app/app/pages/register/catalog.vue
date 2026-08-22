@@ -1,0 +1,490 @@
+<script setup lang="ts">
+import type {
+  CatalogPage,
+  CatalogProduct,
+  CatalogProductDetail,
+  CatalogReference,
+  CatalogVariant,
+} from '@huta/shared/schemas'
+import type { BaseQuantity, Cents } from '@huta/shared'
+import { formatCents, formatGrams, formatQuantity } from '@huta/shared'
+import { ExternalLink, PackageSearch, Search, SearchX } from '@lucide/vue'
+import { Spinner } from '~/components/ui/spinner'
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '~/components/ui/empty'
+import { Button } from '~/components/ui/button'
+import { ToggleGroup, ToggleGroupItem } from '~/components/ui/toggle-group'
+import { apiFetch } from '~/composables/useApi'
+import { useAuthStore } from '~/stores/auth'
+
+/**
+ * The register catalog — a LOOKUP surface for the counter, read-only by design.
+ *
+ * It answers the four questions staff actually get asked: do we have it, what does it
+ * cost (including the flower tier ladder), how strong is it, and does the other store
+ * have it. The browse grid is scoped to THIS store (the badge means "out here"); the
+ * inspector fetches the product without a store scope, which is the read-only
+ * cross-store visibility staff have always been granted. Nothing here computes money —
+ * prices and ladders render the catalog payload verbatim, and selling happens on the
+ * sale screen via the Ring-it-up handoff.
+ */
+definePageMeta({ layout: 'register' })
+
+const router = useRouter()
+const auth = useAuthStore()
+const booted = ref(false)
+
+onMounted(async () => {
+  if (!auth.resolved) await auth.fetchPrincipal()
+  if (!auth.isAuthenticated) return router.replace('/register/pair')
+  if (auth.isUnattendedTerminal) return router.replace('/register/sign-in')
+  if (!auth.isAtTerminal) return router.replace('/')
+  booted.value = true
+
+  reference.value = await apiFetch<CatalogReference>('/catalog/reference')
+  await loadProducts()
+  focusSearch()
+})
+
+const fmt = (cents: number) => formatCents(cents as Cents)
+const hereId = computed(() => auth.terminal?.store.id ?? null)
+
+/* ————— browse: search + chips + grid ————— */
+const reference = ref<CatalogReference | null>(null)
+const categoryId = ref<string | null>(null)
+const cannabinoidIds = ref<string[]>([])
+const parents = computed(() =>
+  (reference.value?.categories ?? []).filter((c) => c.parentId === null),
+)
+const cannabinoidItems = computed(() =>
+  (reference.value?.cannabinoids ?? [])
+    .filter((c) => c.productCount > 0)
+    .map((c) => ({ id: c.id, name: c.name, count: c.productCount })),
+)
+
+const products = ref<CatalogProduct[]>([])
+const loadingProducts = ref(false)
+const term = ref('')
+const searchInput = ref<{ focus: () => void } | null>(null)
+
+function focusSearch() {
+  void nextTick(() => searchInput.value?.focus())
+}
+
+const looksScanned = (q: string) => /^\d{6,}$/.test(q)
+
+/* ————— camera scanning (C: a drop-down panel, CONTINUOUS) ————— */
+const scannerOpen = ref(false)
+const scannerFeedback = ref<{ seq: number, text: string } | null>(null)
+let feedbackSeq = 0
+const toastScanner = (text: string) => (scannerFeedback.value = { seq: ++feedbackSeq, text })
+
+async function onCameraScanned(code: string) {
+  try {
+    const page = await apiFetch<CatalogPage>('/catalog/products', {
+      query: {
+        search: code,
+        pageSize: 8,
+        ...(auth.terminal ? { storeId: auth.terminal.store.id } : {}),
+      },
+    })
+    const products = page.products as CatalogProduct[]
+    if (products.length === 1) {
+      void select(products[0]!.id)
+      toastScanner(`✓ ${products[0]!.name}`)
+    } else {
+      toastScanner(products.length ? 'Several matches — search by name' : 'No match in the catalog')
+    }
+  } catch {
+    toastScanner('Could not search the catalog')
+  }
+}
+
+async function loadProducts() {
+  loadingProducts.value = true
+  try {
+    const q = term.value.trim()
+    const page = await apiFetch<CatalogPage>('/catalog/products', {
+      query: {
+        ...(q.length >= 2 ? { search: q } : {}),
+        ...(categoryId.value ? { categories: [categoryId.value] } : {}),
+        ...(cannabinoidIds.value.length ? { cannabinoids: cannabinoidIds.value } : {}),
+        // The grid is scoped HERE — its badges mean "out at this counter".
+        ...(auth.terminal ? { storeId: auth.terminal.store.id } : {}),
+        page: 1,
+        pageSize: 24,
+      },
+    })
+    products.value = page.products as CatalogProduct[]
+
+    // A scan identifies exactly one product — open it in the inspector.
+    if (products.value.length === 1 && looksScanned(q)) {
+      void select(products.value[0]!.id)
+      term.value = ''
+      await loadProducts()
+    }
+  } finally {
+    loadingProducts.value = false
+  }
+}
+
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+watch(term, () => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => void loadProducts(), 200)
+})
+watch([categoryId, cannabinoidIds], () => void loadProducts())
+
+function toggleCannabinoid(id: string) {
+  cannabinoidIds.value = cannabinoidIds.value.includes(id)
+    ? cannabinoidIds.value.filter((c) => c !== id)
+    : [...cannabinoidIds.value, id]
+}
+
+/** A scanner is a keyboard — keystrokes that land nowhere go to the search bar. */
+function onWindowKeydown(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null
+  if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+  if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault()
+    term.value += event.key
+    focusSearch()
+  }
+}
+onMounted(() => window.addEventListener('keydown', onWindowKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onWindowKeydown))
+
+/* ————— rendering helpers ————— */
+const STATUS_BADGE: Record<string, { label: string; class: string }> = {
+  OUT: { label: 'Out here', class: 'bg-destructive/15 text-destructive' },
+  LOW: { label: 'Low', class: 'bg-amber-500/15 text-amber-500' },
+}
+
+/** "THCA 24%" or "Δ8 800mg" — the payload carries one of the two columns. */
+function potencyLabel(link: CatalogProduct['cannabinoids'][number]): string {
+  const value =
+    link.percentBps != null
+      ? `${(link.percentBps / 100).toFixed(1).replace(/\.0$/, '')}%`
+      : link.mgPerUnit != null
+        ? `${link.mgPerUnit}mg`
+        : null
+  return value ? `${link.cannabinoid.name} ${value}` : link.cannabinoid.name
+}
+
+function variantPriceText(variant: CatalogVariant): string {
+  if (variant.trackingMode === 'WEIGHT') {
+    const rate = variant.priceGroup?.basePricePerGramCents
+    return rate != null ? `${fmt(rate)}/g` : '—'
+  }
+  return variant.priceCents != null ? fmt(variant.priceCents) : '—'
+}
+
+/** The card's one price line: the variant's price, or "from $X" across several. */
+function productPriceText(product: CatalogProduct): string {
+  if (product.variants.length === 1) return variantPriceText(product.variants[0]!)
+  const prices = product.variants
+    .map((v) =>
+      v.trackingMode === 'WEIGHT' ? v.priceGroup?.basePricePerGramCents ?? null : v.priceCents,
+    )
+    .filter((p): p is number => p != null)
+  return prices.length ? `from ${fmt(Math.min(...prices))}` : '—'
+}
+
+const brokenImages = ref(new Set<string>())
+
+const qty = (base: number, mode: CatalogVariant['trackingMode']) =>
+  formatQuantity(base as BaseQuantity, mode)
+
+/* ————— the inspector ————— */
+const detail = ref<CatalogProductDetail | null>(null)
+const loadingDetail = ref(false)
+
+async function select(productId: string) {
+  loadingDetail.value = true
+  try {
+    // No storeId: the detail carries EVERY store's on-hand — the read-only cross-store
+    // visibility staff are granted, and the answer to "does Ashley have it".
+    detail.value = await apiFetch<CatalogProductDetail>(`/catalog/products/${productId}`)
+  } finally {
+    loadingDetail.value = false
+  }
+}
+
+const storeNameById = computed(
+  () => new Map((detail.value?.stores ?? []).map((s) => [s.id, s.name])),
+)
+
+/** byStore in reference order, except HERE always leads — it's the counter's answer. */
+function storeRows(variant: CatalogVariant) {
+  return [...variant.stock.byStore].sort((a, b) =>
+    a.storeId === hereId.value ? -1 : b.storeId === hereId.value ? 1 : 0,
+  )
+}
+
+/** The tier ladder, entry-priced: the base rate at 1g, then each typed tier total. */
+function ladderRows(variant: CatalogVariant) {
+  const group = variant.priceGroup
+  if (!group) return []
+  return [
+    { label: '1g', priceCents: group.basePricePerGramCents },
+    ...group.tiers.map((tier) => ({
+      label: formatGrams(tier.minQuantityBase as BaseQuantity),
+      priceCents: tier.totalPriceCents,
+    })),
+  ]
+}
+
+function ringUp(variantId: string) {
+  if (!detail.value) return
+  void router.push({
+    path: '/register/sale',
+    query: { add: variantId, product: detail.value.id },
+  })
+}
+
+const detailImage = computed(() => {
+  const d = detail.value
+  if (!d) return null
+  const url = d.images[0]?.url ?? d.imageUrl
+  return url && !brokenImages.value.has(url) ? url : null
+})
+</script>
+
+<template>
+  <div class="flex h-dvh flex-col">
+    <RegisterBar />
+
+    <div v-if="booted" class="flex min-h-0 flex-1">
+      <RegisterRail active="/register/catalog" />
+
+      <!-- browse -->
+      <main class="flex min-w-0 flex-1 flex-col gap-3 p-4">
+        <div class="relative">
+          <Search class="pointer-events-none absolute left-3.5 top-1/2 z-10 size-4 -translate-y-1/2 text-primary" />
+          <SearchInput
+            ref="searchInput"
+            v-model="term"
+            scanner
+            placeholder="Scan a barcode or search the catalog…"
+            autocomplete="off"
+            spellcheck="false"
+            class="h-12 border-primary/60 pl-10 text-base shadow-[0_0_0_3px_rgba(34,197,94,0.10)]"
+            aria-label="Scan or search"
+            @scan="scannerOpen = !scannerOpen"
+          />
+          <RegisterCameraScanner
+            :open="scannerOpen"
+            :feedback="scannerFeedback"
+            @scanned="onCameraScanned"
+            @close="scannerOpen = false"
+          />
+        </div>
+
+        <div class="flex flex-wrap items-center gap-1.5">
+          <ToggleGroup
+            :model-value="categoryId ?? '__all'"
+            type="single"
+            :spacing="1.5"
+            aria-label="Category"
+            class="flex-wrap"
+            @update:model-value="(v) => categoryId = !v || v === '__all' ? null : (v as string)"
+          >
+            <ToggleGroupItem value="__all" class="h-9 rounded-full border border-input px-3.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent data-[state=on]:border-primary/50 data-[state=on]:bg-primary/12 data-[state=on]:text-primary">All</ToggleGroupItem>
+            <ToggleGroupItem
+              v-for="cat in parents"
+              :key="cat.id"
+              :value="cat.id"
+              class="h-9 rounded-full border border-input px-3.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent data-[state=on]:border-primary/50 data-[state=on]:bg-primary/12 data-[state=on]:text-primary"
+            >
+              {{ cat.name }}
+            </ToggleGroupItem>
+          </ToggleGroup>
+          <span class="mx-1 h-5 border-l" aria-hidden="true" />
+          <CatalogFilterChip
+            pill
+            label="Cannabinoids"
+            :items="cannabinoidItems"
+            :selected="cannabinoidIds"
+            footnote="Products must contain EVERY selected one. Counts are catalog totals."
+            @toggle="toggleCannabinoid"
+            @clear="cannabinoidIds = []"
+          />
+        </div>
+
+        <div class="relative min-h-0 flex-1 overflow-y-auto">
+          <div v-if="loadingProducts" class="absolute inset-0 z-10 bg-background/50" aria-hidden="true" />
+          <Empty v-if="!products.length && !loadingProducts" class="flex-none border">
+            <EmptyHeader>
+              <EmptyMedia variant="icon"><SearchX /></EmptyMedia>
+              <EmptyTitle>Nothing matches</EmptyTitle>
+              <EmptyDescription>Try another search, or remove a chip.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+          <div class="grid grid-cols-2 gap-2.5 xl:grid-cols-3">
+            <button
+              v-for="product in products"
+              :key="product.id"
+              type="button"
+              class="flex flex-col gap-1.5 rounded-2xl border bg-card p-3 text-left transition-colors"
+              :class="detail?.id === product.id ? 'border-primary/50 bg-primary/8' : 'hover:border-primary/40 hover:bg-accent/40'"
+              @click="select(product.id)"
+            >
+              <span class="flex h-20 items-center justify-center overflow-hidden rounded-xl bg-accent/60">
+                <img
+                  v-if="product.imageUrl && !brokenImages.has(product.imageUrl)"
+                  :src="product.imageUrl"
+                  :alt="product.name"
+                  class="h-full w-full object-cover"
+                  loading="lazy"
+                  @error="brokenImages.add(product.imageUrl)"
+                />
+                <span v-else class="text-2xl font-extrabold text-muted-foreground/50">
+                  {{ product.name.charAt(0) }}
+                </span>
+              </span>
+              <span class="flex items-start justify-between gap-2">
+                <span class="line-clamp-2 text-sm font-semibold leading-snug">{{ product.name }}</span>
+                <span
+                  v-if="STATUS_BADGE[product.stock.status]"
+                  class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+                  :class="STATUS_BADGE[product.stock.status]!.class"
+                >
+                  {{ STATUS_BADGE[product.stock.status]!.label }}
+                </span>
+              </span>
+              <span class="truncate text-xs text-muted-foreground">
+                {{ [product.brand?.name, ...product.cannabinoids.slice(0, 2).map(potencyLabel)].filter(Boolean).join(' · ') || product.category.name }}
+              </span>
+              <span class="mt-auto text-sm font-bold tabular-nums text-primary">
+                {{ productPriceText(product) }}
+              </span>
+            </button>
+          </div>
+        </div>
+      </main>
+
+      <!-- inspector -->
+      <aside class="flex w-[400px] shrink-0 flex-col border-l bg-card" aria-label="Product details">
+        <Empty v-if="!detail && !loadingDetail" class="m-6 border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><PackageSearch /></EmptyMedia>
+            <EmptyTitle>Nothing selected</EmptyTitle>
+            <EmptyDescription>Tap a product — or scan it — to see prices, potency, and stock at both stores.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+        <p v-else-if="loadingDetail && !detail" class="m-6 flex items-center gap-2 text-sm text-muted-foreground">
+          <Spinner aria-hidden="true" />Loading…
+        </p>
+
+        <div v-else-if="detail" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4" :class="loadingDetail ? 'opacity-60' : ''">
+          <div class="flex items-start gap-3">
+            <div class="min-w-0 flex-1">
+              <h2 class="text-lg font-extrabold leading-tight tracking-tight">{{ detail.name }}</h2>
+              <p class="mt-0.5 text-xs text-muted-foreground">
+                {{ [detail.category.name, detail.brand?.name, detail.strainType?.toLowerCase()].filter(Boolean).join(' · ') }}
+              </p>
+            </div>
+            <span class="flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-accent/60">
+              <img v-if="detailImage" :src="detailImage" :alt="detail.name" class="h-full w-full object-cover" @error="detailImage && brokenImages.add(detailImage)" />
+              <span v-else class="text-xl font-extrabold text-muted-foreground/50">{{ detail.name.charAt(0) }}</span>
+            </span>
+          </div>
+
+          <div v-if="detail.cannabinoids.length || detail.nose" class="flex flex-wrap gap-1.5">
+            <span
+              v-for="link in detail.cannabinoids"
+              :key="link.cannabinoid.id"
+              class="rounded-full bg-primary/12 px-2 py-0.5 text-[11px] font-semibold text-primary"
+            >
+              {{ potencyLabel(link) }}
+            </span>
+            <span v-if="detail.nose" class="rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              nose: {{ detail.nose }}
+            </span>
+            <span v-if="detail.terpeneProfile" class="rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              {{ detail.terpeneProfile }}
+            </span>
+          </div>
+
+          <!-- one variant: the rich block; several: compact rows -->
+          <template v-if="detail.variants.length === 1">
+            <div v-for="variant in detail.variants" :key="variant.id" class="flex flex-col gap-3">
+              <div v-if="variant.trackingMode === 'WEIGHT' && variant.priceGroup">
+                <p class="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Price ladder</p>
+                <div class="flex flex-col gap-1">
+                  <div
+                    v-for="row in ladderRows(variant)"
+                    :key="row.label"
+                    class="flex items-center justify-between rounded-lg border bg-background/60 px-3 py-1.5 text-sm"
+                  >
+                    <span>{{ row.label }}</span>
+                    <span class="font-bold tabular-nums">{{ fmt(row.priceCents) }}</span>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="flex items-center justify-between rounded-lg border bg-background/60 px-3 py-2">
+                <span class="text-sm">{{ variant.label ?? 'Price' }}</span>
+                <span class="text-base font-bold tabular-nums text-primary">{{ variantPriceText(variant) }}</span>
+              </div>
+
+              <div>
+                <p class="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">On hand</p>
+                <div class="flex flex-col gap-1">
+                  <div
+                    v-for="row in storeRows(variant)"
+                    :key="row.storeId"
+                    class="flex items-center justify-between rounded-lg border bg-background/60 px-3 py-1.5 text-sm"
+                  >
+                    <span :class="row.storeId === hereId ? 'font-bold' : 'text-muted-foreground'">
+                      {{ storeNameById.get(row.storeId) ?? '—' }}{{ row.storeId === hereId ? ' — here' : '' }}
+                    </span>
+                    <span
+                      class="font-bold tabular-nums"
+                      :class="row.quantityBase <= 0 ? 'text-destructive' : row.storeId === hereId ? 'text-primary' : 'text-muted-foreground'"
+                    >
+                      {{ qty(row.quantityBase, variant.trackingMode) }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <Button class="h-12 text-base font-bold" @click="ringUp(variant.id)">Ring it up →</Button>
+            </div>
+          </template>
+
+          <div v-else class="flex flex-col gap-1.5">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Options</p>
+            <div
+              v-for="variant in detail.variants"
+              :key="variant.id"
+              class="flex items-center gap-2 rounded-lg border bg-background/60 px-3 py-2"
+            >
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-semibold">{{ variant.label ?? detail.name }}</p>
+                <p class="text-[11px] tabular-nums text-muted-foreground">
+                  {{ storeRows(variant).map((row) => `${storeNameById.get(row.storeId)?.split(' ')[0] ?? '—'}${row.storeId === hereId ? ' (here)' : ''}: ${qty(row.quantityBase, variant.trackingMode)}`).join(' · ') }}
+                </p>
+              </div>
+              <span class="shrink-0 text-sm font-bold tabular-nums text-primary">{{ variantPriceText(variant) }}</span>
+              <Button variant="outline" size="sm" class="h-8 shrink-0" @click="ringUp(variant.id)">Ring up</Button>
+            </div>
+          </div>
+
+          <p v-if="detail.description" class="text-sm leading-relaxed text-muted-foreground">
+            {{ detail.description }}
+          </p>
+
+          <a
+            v-if="detail.coaUrl"
+            :href="detail.coaUrl"
+            target="_blank"
+            rel="noopener"
+            class="flex items-center gap-1.5 text-sm text-primary underline underline-offset-2 hover:no-underline"
+          >
+            Certificate of analysis <ExternalLink class="size-3.5" />
+          </a>
+        </div>
+      </aside>
+    </div>
+
+  </div>
+</template>

@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "tsconfig.tsbuildinfo",
+    "exactOptionalPropertyTypes": true,
+
+    // Deliberately empty. Strips ambient @types/node so `process`, `Buffer` and
+    // `__dirname` are compile errors inside this package. Combined with `lib: ["ES2023"]`
+    // (no DOM) from the base config, that makes "shared/ is safe in both a browser and a
+    // server" a mechanical guarantee rather than a convention someone will forget.
+    "types": []
+  },
+  "include": ["src"]
+}

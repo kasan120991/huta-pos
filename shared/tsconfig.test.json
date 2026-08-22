@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "rootDir": ".",
+    // Still no ambient node types: tests import everything explicitly from vitest, so the
+    // browser-safety guarantee in tsconfig.json holds here too.
+    "types": []
+  },
+  "include": ["src", "test"]
+}

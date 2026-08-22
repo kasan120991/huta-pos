@@ -1,0 +1,157 @@
+import { z } from 'zod'
+
+import { zCuid, zPin } from './primitives.js'
+
+/**
+ * Auth request schemas.
+ *
+ * Both sides import these: the server validates with them, the login form validates
+ * against the same rules before it ever hits the network. the house rules — if both sides need
+ * a type, it goes in `shared/`.
+ *
+ * For request TYPES reach for `z.input<>`, not `z.infer<>`: transforms make the two
+ * different, and the wire shape is the input.
+ */
+
+export const loginRequestSchema = z.object({
+  email: z.email('Enter a valid email address.'),
+  password: z.string().min(1, 'Enter your password.'),
+})
+export type LoginRequest = z.input<typeof loginRequestSchema>
+
+export const staffAttachRequestSchema = z.object({
+  userId: zCuid,
+  pin: zPin,
+})
+export type StaffAttachRequest = z.input<typeof staffAttachRequestSchema>
+
+export const pairTerminalRequestSchema = z.object({
+  code: z.string().min(4).max(32),
+})
+export type PairTerminalRequest = z.input<typeof pairTerminalRequestSchema>
+
+/**
+ * A person who may attach at a register.
+ *
+ * First name and last initial ONLY — that is all the roster endpoint returns, and the
+ * restraint is deliberate: this list is readable by an unattended terminal, so it must
+ * not enumerate staff details to whoever walks up to it.
+ */
+export interface RosterEntry {
+  readonly userId: string
+  readonly firstName: string
+  readonly lastInitial: string
+}
+
+/** What a successful pairing returns. Echoed back so the setter-up can confirm the match. */
+export interface PairedTerminal {
+  readonly deviceToken: string
+  readonly terminal: { readonly id: string; readonly name: string }
+  readonly store: { readonly id: string; readonly name: string }
+}
+
+export interface AttachedUser {
+  readonly id: string
+  readonly firstName: string
+  readonly lastName: string
+  readonly role: 'ADMIN' | 'STAFF'
+}
+
+/**
+ * Who the signed-in person IS, as opposed to what they may do.
+ *
+ * Deliberately separate from `Principal`. A principal is an authorization object — ids and
+ * nothing else — threaded through every service and constructed as a literal in two dozen
+ * tests. Names are presentation, and putting them on the principal would both break all of
+ * those and blur the line between "who is this" and "what may they do".
+ *
+ * Unlike `RosterEntry`, this is the caller's OWN record, so a full name is not an
+ * enumeration risk. It still carries no password hash, PIN hash or `pinLookup` — nothing
+ * derived from a credential ever leaves the server.
+ */
+export interface UserProfile {
+  readonly id: string
+  readonly firstName: string
+  readonly lastName: string
+  readonly email: string | null
+  readonly role: 'ADMIN' | 'STAFF'
+}
+
+/**
+ * WHERE the session is, by name — the third leg of `/auth/me`, beside `principal` (what
+ * may this request do) and `user` (whose name goes in the corner). Null for a desk
+ * session. Exists so a register can say "Main Store (Baytree) · Register 1" on its
+ * sign-in screen every day, not only in the one-time pairing confirmation — a mis-paired
+ * machine should be visible at a glance, not discovered at opening.
+ */
+export interface TerminalInfo {
+  readonly id: string
+  readonly name: string
+  readonly store: { readonly id: string; readonly name: string }
+}
+
+/** A terminal as the Registers admin screen sees it. */
+export interface TerminalAdminRow {
+  readonly id: string
+  readonly name: string
+  readonly active: boolean
+  /** Null until the device first authenticates — how "never paired" reads on screen. */
+  readonly lastSeenAt: string | null
+  readonly createdAt: string
+  readonly store: { readonly id: string, readonly name: string }
+}
+
+/** What POST /auth/terminal/pairing-code returns. The code is shown ONCE, never stored. */
+export interface PairingCodeIssued {
+  readonly code: string
+  readonly expiresAt: string
+}
+
+/**
+ * The error envelope every failed request returns. Modelled here so the client renders
+ * one known shape rather than guessing per endpoint.
+ */
+export const ERROR_CODES = [
+  'UNAUTHORIZED',
+  'FORBIDDEN',
+  'NOT_FOUND',
+  'CONFLICT',
+  'VALIDATION_FAILED',
+  'RATE_LIMITED',
+  'ACCOUNT_LOCKED',
+  'STEP_UP_REQUIRED',
+  'INSUFFICIENT_STOCK',
+  'AGE_VERIFICATION_REQUIRED',
+  'PAYMENT_FAILED',
+  'INTERNAL',
+] as const
+
+/**
+ * Why a PAYMENT_FAILED 409 happened — the register branches on this: `amount_mismatch`
+ * means re-quote and stage a fresh intent; `refund_failed` means the record exists but
+ * the card money did not move.
+ */
+export const PAYMENT_FAILURE_REASONS = [
+  'not_succeeded',
+  'amount_mismatch',
+  'intent_already_used',
+  'refund_failed',
+] as const
+
+export type PaymentFailureReason = (typeof PAYMENT_FAILURE_REASONS)[number]
+
+export type ErrorCode = (typeof ERROR_CODES)[number]
+
+export interface ApiErrorBody {
+  readonly error: {
+    readonly code: ErrorCode
+    readonly message: string
+    readonly details?: {
+      readonly retryAfterSeconds?: number
+      readonly action?: string
+      /** PAYMENT_FAILED only. */
+      readonly reason?: PaymentFailureReason
+      readonly issues?: ReadonlyArray<{ readonly path: string; readonly message: string }>
+    }
+  }
+}

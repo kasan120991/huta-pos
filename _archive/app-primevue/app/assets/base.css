@@ -1,0 +1,49 @@
+/*
+ * Base styles.
+ *
+ * Deliberately thin — PrimeVue's theme owns colour and component styling through design
+ * tokens. Anything here should be layout or reset, not a colour override.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#__nuxt {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  /* Both from PrimeVue's own token set, so they follow the theme and dark mode. */
+  background: var(--p-surface-100);
+  color: var(--p-surface-900);
+  -webkit-font-smoothing: antialiased;
+  /* Weights and money line up in columns all over this product. */
+  font-variant-numeric: tabular-nums;
+}
+
+.app-dark body {
+  background: var(--p-surface-950);
+  color: var(--p-surface-100);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

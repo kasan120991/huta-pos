@@ -1,0 +1,11 @@
+packages:
+  - 'app'
+  - 'server'
+  - 'shared'
+allowBuilds:
+  '@prisma/engines': true
+  esbuild: true
+  prisma: true
+  vue-demi: true
+minimumReleaseAgeExclude:
+  - jose@6.2.9

@@ -1,0 +1,1411 @@
+// Huta POS — database schema
+//
+// Conventions enforced throughout (see the house rules):
+//   * Money is ALWAYS integer cents. Field names end in `Cents`. No Float, no Decimal.
+//   * Quantities are ALWAYS integers in the variant's base unit. Field names end in
+//     `Base`. EACH -> 1 item. WEIGHT -> 1 milligram (3.5g == 3500).
+//   * Rates and percentages are integer basis points. Field names end in `Bps`.
+//     825 == 8.25%.
+//   * Historical records snapshot what they need. Never join a sale to current prices,
+//     costs, suppliers, or pricing rules.
+//   * Ledger tables (InventoryMovement, LoyaltyTransaction, Payment, Refund) are
+//     append-only. Nothing deletes from them.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  // Prisma 7 defaults to emitting internal imports with `.ts` extensions, which do not
+  // compile under a conventional NodeNext build without `allowImportingTsExtensions`.
+  importFileExtension = "js"
+}
+
+// Prisma 7: the connection URL and driver adapter live in prisma.config.ts, not here.
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  STAFF
+}
+
+/// EACH  -> quantityBase counts whole items.
+/// WEIGHT -> quantityBase counts milligrams.
+enum TrackingMode {
+  EACH
+  WEIGHT
+}
+
+enum StrainType {
+  INDICA
+  SATIVA
+  HYBRID
+}
+
+enum MovementType {
+  SALE
+  RETURN
+  TRANSFER_OUT
+  TRANSFER_IN
+  ADJUSTMENT
+  RECEIVE
+  SHRINKAGE
+}
+
+enum TransferStatus {
+  PENDING
+  ACCEPTED
+  IN_TRANSIT
+  RECEIVED
+  DECLINED
+  CANCELLED
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum SaleStatus {
+  COMPLETED
+  VOIDED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+enum CashMovementType {
+  PAID_IN
+  PAID_OUT
+  DROP
+}
+
+enum PromotionScope {
+  VARIANT
+  PRODUCT
+  CATEGORY
+  PRICE_GROUP
+}
+
+/// PERCENT_OFF              -> value is basis points off (1500 == 15%).
+/// AMOUNT_OFF               -> value is cents off the line.
+/// OVERRIDE_PRICE_PER_GRAM  -> value is the replacement cents-per-gram rate.
+enum DiscountType {
+  PERCENT_OFF
+  AMOUNT_OFF
+  OVERRIDE_PRICE_PER_GRAM
+}
+
+enum LoyaltyTransactionType {
+  EARN
+  REDEEM
+  ADJUST
+  CREDIT_ADD
+  CREDIT_SPEND
+}
+
+// ---------------------------------------------------------------------------
+// Stores, users, terminals
+// ---------------------------------------------------------------------------
+
+model Store {
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  state        String?
+  postalCode   String?
+  phone        String?
+  /// IANA timezone, e.g. "America/Chicago". Shift and report boundaries use this,
+  /// never the server's timezone.
+  timezone     String   @default("America/Chicago")
+  /// Flat sales tax rate in basis points. 825 == 8.25%.
+  taxRateBps   Int      @default(0)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  users              User[]
+  terminals          Terminal[]
+  stockLevels        StockLevel[]
+  movements          InventoryMovement[]
+  sales              Sale[]
+  shifts             Shift[]
+  purchaseOrders     PurchaseOrder[]
+  receipts           Receipt[]
+  counters           StoreCounter[]
+  promotionStores    PromotionStore[]
+  transfersRequested TransferRequest[]   @relation("RequestingStore")
+  transfersSourced   TransferRequest[]   @relation("SourceStore")
+
+  @@index([active])
+}
+
+model User {
+  id           String  @id @default(cuid())
+  email        String? @unique
+  passwordHash String?
+  firstName    String
+  lastName     String
+  role         Role
+  /// Argon2id hash of the PIN. Verification only — never queried directly.
+  pinHash      String?
+  /// Deterministic HMAC(pin, PIN_PEPPER). Exists so a PIN can be looked up in O(1)
+  /// and so uniqueness within a store is enforceable by the database. An argon2
+  /// hash is salted and therefore cannot do either.
+  pinLookup    String?
+
+  /// Required for STAFF (determines the inventory they see), null for ADMIN.
+  /// Enforced by a CHECK constraint added in migration — Prisma cannot express it.
+  storeId String?
+  store   Store?  @relation(fields: [storeId], references: [id], onDelete: Restrict)
+
+  active            Boolean   @default(true)
+  lastLoginAt       DateTime?
+  failedPinAttempts Int       @default(0)
+  lockedUntil       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  refreshTokens         RefreshToken[]
+  movements             InventoryMovement[]
+  salesAsCashier        Sale[]                @relation("SaleCashier")
+  salesAgeVerified      Sale[]                @relation("SaleAgeVerifier")
+  salesVoided           Sale[]                @relation("SaleVoider")
+  shiftsOpened          Shift[]               @relation("ShiftOpener")
+  shiftsClosed          Shift[]               @relation("ShiftCloser")
+  cashMovements         CashMovement[]
+  transfersRequested    TransferRequest[]     @relation("TransferRequester")
+  transfersAccepted     TransferRequest[]     @relation("TransferAcceptor")
+  transfersShipped      TransferRequest[]     @relation("TransferShipper")
+  transfersReceived     TransferRequest[]     @relation("TransferReceiver")
+  purchaseOrdersCreated PurchaseOrder[]
+  receiptsReceived      Receipt[]             @relation("ReceiptReceiver")
+  receiptsReviewed      Receipt[]             @relation("ReceiptReviewer")
+  refundsIssued         Refund[]              @relation("RefundIssuer")
+  refundsApproved       Refund[]              @relation("RefundApprover")
+  promotionsCreated     Promotion[]
+  auditLogs             AuditLog[]
+  pairingCodesCreated   TerminalPairingCode[]
+  stepUpGrants          StepUpGrant[]         @relation("StepUpApprover")
+
+  /// A PIN identifies exactly one person, GLOBALLY.
+  ///
+  /// Not per-store, because admins have no store and can act at any terminal. A
+  /// (storeId, pinLookup) index cannot do this job: admins have storeId NULL, Postgres
+  /// treats NULLs as distinct, so every admin PIN would count as unique and a staff PIN
+  /// could still collide with one. A PIN that matches two people makes "who rang this
+  /// sale" unanswerable, which is the whole point of PIN attribution.
+  @@unique([pinLookup])
+  @@index([storeId, active])
+  @@index([role])
+}
+
+/// A registered POS device. Establishes WHICH STORE a terminal belongs to; the staff
+/// PIN establishes WHO is acting. Two separate layers on purpose.
+model Terminal {
+  id        String   @id @default(cuid())
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name      String
+  /// SHA-256 of the device token. The raw token is shown once at registration.
+  tokenHash String   @unique
+  active    Boolean  @default(true)
+  lastSeenAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  shifts       Shift[]
+  sales        Sale[]
+  pairingCodes TerminalPairingCode[]
+  stepUpGrants StepUpGrant[]
+
+  /// Stable key for upserts. Without it the seed can only key on tokenHash, which means
+  /// regenerating a device token silently creates a SECOND terminal.
+  @@unique([storeId, name])
+  @@index([storeId, active])
+}
+
+/// One-time code an admin generates so a new register can enrol itself.
+///
+/// The raw code is displayed once and never stored — only its SHA-256. Short-lived and
+/// single-use, so a code read over the phone or left on a screen stops being useful
+/// quickly. This exists so a long-lived device token never has to be copied by hand.
+model TerminalPairingCode {
+  id         String    @id @default(cuid())
+  terminalId String
+  terminal   Terminal  @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  codeHash   String    @unique
+  expiresAt  DateTime
+  usedAt     DateTime?
+
+  createdById String?
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([terminalId])
+  @@index([expiresAt])
+}
+
+/// A single-use record that an admin authorised one specific privileged action at one
+/// terminal — the "manager comes over and approves it" gesture.
+///
+/// Generic on purpose: refunds, price overrides and stock adjustments all consume the
+/// same mechanism. It doubles as the audit record of who approved what, which is the
+/// actual reason step-up exists rather than just letting staff proceed.
+model StepUpGrant {
+  id          String @id @default(cuid())
+  adminUserId String
+  adminUser   User   @relation("StepUpApprover", fields: [adminUserId], references: [id], onDelete: Restrict)
+
+  terminalId String?
+  terminal   Terminal? @relation(fields: [terminalId], references: [id], onDelete: SetNull)
+
+  /// The capability this grant authorises, e.g. "refund.issue". A grant is valid for
+  /// exactly one action; it is not a general elevation.
+  action      String
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([adminUserId, createdAt])
+  @@index([expiresAt])
+  @@index([action, createdAt])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// Per-store monotonic counters (currently just receipt numbers). Allocated with
+/// SELECT ... FOR UPDATE inside the sale transaction so numbers never collide or gap.
+model StoreCounter {
+  id      String @id @default(cuid())
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name    String
+  value   Int    @default(0)
+
+  @@unique([storeId, name])
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+/// Reference table, NOT an enum — the product mix shifts and adding a category must
+/// be a row insert an admin can do, not a migration plus a deploy.
+model Category {
+  id        String  @id @default(cuid())
+  name      String
+  slug      String  @unique
+  parentId  String?
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children  Category[] @relation("CategoryTree")
+  sortOrder Int     @default(0)
+  active    Boolean @default(true)
+
+  /// Fallback reorder point in BASE UNITS, used when a StockLevel sets none of its own.
+  /// Items for an EACH category, MILLIGRAMS for flower. Null means variants in this
+  /// category can only ever be OUT, never LOW — the honest answer for a node with no
+  /// products. Seeded from CATEGORY_SEED, then admin-editable.
+  defaultReorderBase Int?
+
+  products   Product[]
+  promotions Promotion[]
+
+  @@index([parentId])
+}
+
+/// Reference table, NOT an enum — the cannabinoid market invents new isomers
+/// constantly. Adding delta-11 must not require a deploy.
+model Cannabinoid {
+  id        String  @id @default(cuid())
+  name      String
+  slug      String  @unique
+  sortOrder Int     @default(0)
+  active    Boolean @default(true)
+
+  products ProductCannabinoid[]
+  variants VariantCannabinoid[]
+}
+
+model Supplier {
+  id                 String  @id @default(cuid())
+  name               String
+  slug               String  @unique
+  contactName        String?
+  phone              String?
+  email              String?
+  website            String?
+  addressLine1       String?
+  addressLine2       String?
+  city               String?
+  state              String?
+  postalCode         String?
+  accountNumber      String?
+  /// Free text, e.g. "Net 30".
+  paymentTerms       String?
+  minimumOrderCents  Int?
+  licenseNumber      String?
+  notes              String?
+  /// Inactive suppliers drop out of pickers but keep all of their history.
+  active             Boolean @default(true)
+  /// Primary key from the legacy `huta-old` MySQL database. Makes the import
+  /// re-runnable without creating duplicates.
+  legacyId           String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products       Product[]
+  variants       ProductVariant[]
+  batches        Batch[]
+  purchaseOrders PurchaseOrder[]
+  receipts       Receipt[]
+  saleLines      SaleLine[]
+
+  @@index([active])
+}
+
+/// The catalog concept — not sellable on its own. For flower, the STRAIN is the
+/// Product (Blue Dream), which is what makes per-strain promos and per-strain
+/// reporting work while still rolling up to "flower as a whole" via Category.
+model Product {
+  id          String  @id @default(cuid())
+  name        String
+  slug        String  @unique
+  description String?
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  /// The maker of the product. Distinct from the supplier, which is who we buy it FROM —
+  /// a distributor like "CBD Hemp Experts" carries many brands.
+  brandId String?
+  brand   Brand?  @relation(fields: [brandId], references: [id], onDelete: SetNull)
+
+  /// Default/primary supplier. Nullable — plenty of inventory has no supplier link.
+  /// Per-delivery attribution lives on Batch.supplierId; this is the fallback used
+  /// when resolving SaleLine.supplierId.
+  primarySupplierId String?
+  primarySupplier   Supplier? @relation(fields: [primarySupplierId], references: [id], onDelete: SetNull)
+
+  coaUrl String?
+
+  /// Flower-specific attributes. Null for everything else.
+  strainType     StrainType?
+  terpeneProfile String?
+  nose           String?
+
+  active    Boolean  @default(true)
+  legacyId  String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  variants     ProductVariant[]
+  images       ProductImage[]
+  cannabinoids ProductCannabinoid[]
+  promotions   Promotion[]
+
+  @@index([categoryId, active])
+  @@index([primarySupplierId])
+  @@index([brandId])
+}
+
+/// The maker of a product. Deliberately separate from Supplier: in the legacy catalog
+/// brand lived only inside product title strings ("Binoid ...", "Just CBD ..."), while
+/// suppliers are distributors carrying many brands. Modelling them as one thing would
+/// make brand-level reporting impossible.
+model Brand {
+  id       String  @id @default(cuid())
+  name     String
+  slug     String  @unique
+  website  String?
+  notes    String?
+  active   Boolean @default(true)
+  /// No legacy brand table existed — the import derives brands from title strings, so
+  /// this stays null. Present for symmetry with Product and Supplier.
+  legacyId String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+
+  @@index([active])
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String
+  alt       String?
+  sortOrder Int     @default(0)
+
+  @@index([productId])
+}
+
+/// Potency. Packaged goods express it as mg per unit; flower expresses it as a
+/// percentage of weight. Both columns exist so neither has to be faked — populate
+/// whichever applies, or NEITHER: "contains Delta-8, potency unknown" is a legitimate
+/// and very common state, and is exactly what most of the legacy catalog records.
+/// Per-VARIANT potency. Mirrors ProductCannabinoid exactly, and exists for the same
+/// reason as the strain columns above: several strains now live as variants of one flower
+/// product, and "24.50% THCa" is a fact about Blue Dream, not about the shelf.
+///
+/// Fallback is ALL-OR-NOTHING, unlike the scalar strain columns: if a variant has any link
+/// at all its list REPLACES the product's, otherwise it inherits the product's whole list.
+/// Merging two potency lists would have to answer "the product says 24%, the variant says
+/// 19% — which?", and there is no honest answer.
+model VariantCannabinoid {
+  variantId     String
+  variant       ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  cannabinoidId String
+  cannabinoid   Cannabinoid    @relation(fields: [cannabinoidId], references: [id], onDelete: Restrict)
+
+  mgPerUnit  Int?
+  /// Basis points. 2450 == 24.50% THCa.
+  percentBps Int?
+
+  @@id([variantId, cannabinoidId])
+  @@index([cannabinoidId])
+}
+
+model ProductCannabinoid {
+  productId     String
+  product       Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  cannabinoidId String
+  cannabinoid   Cannabinoid @relation(fields: [cannabinoidId], references: [id], onDelete: Restrict)
+
+  mgPerUnit  Int?
+  /// Basis points. 2450 == 24.50% THCa.
+  percentBps Int?
+
+  @@id([productId, cannabinoidId])
+  @@index([cannabinoidId])
+}
+
+/// The sellable unit.
+///
+/// Invariants enforced by CHECK constraints in migration (Prisma cannot express them):
+///   * trackingMode = EACH   requires priceCents IS NOT NULL
+///   * trackingMode = WEIGHT requires priceGroupId IS NOT NULL AND priceCents IS NULL
+model ProductVariant {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  sku     String  @unique
+  barcode String? @unique
+  /// Size / strength / flavor, e.g. "1000mg" or "Blueberry".
+  label   String?
+
+  trackingMode TrackingMode @default(EACH)
+
+  /// Per-item price. EACH variants only — WEIGHT variants price through priceGroup.
+  priceCents Int?
+  /// Most recent unit cost. For WEIGHT variants this is cost per gram.
+  /// ADMIN-ONLY: must be stripped from any response to a staff principal.
+  costCents  Int?
+
+  priceGroupId String?
+  priceGroup   PriceGroup? @relation(fields: [priceGroupId], references: [id], onDelete: Restrict)
+
+  taxable Boolean @default(true)
+
+  /// Sale guardrails in base units. For flower, minimum and maximum weight per line.
+  minSaleBase Int?
+  maxSaleBase Int?
+
+  /// Strain/identity attributes, added 2026-08-21 when strains became VARIANTS of one
+  /// flower Product rather than Products of their own. NULL means "inherit the product's"
+  /// — every read goes through resolveVariantIdentity(), never straight to the column,
+  /// so a packaged good that never sets these is completely unaffected.
+  strainType     StrainType?
+  terpeneProfile String?
+  nose           String?
+  coaUrl         String?
+  description    String?
+
+  /// Per-variant supplier, overriding Product.primarySupplierId when SaleLine.supplierId
+  /// is resolved at sale time. Two strains on one shelf routinely come from two
+  /// distributors, and without this every flower sale attributes to a single supplier.
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+
+  active    Boolean  @default(true)
+  legacyId  String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cannabinoids       VariantCannabinoid[]
+  stockLevels        StockLevel[]
+  batches            Batch[]
+  movements          InventoryMovement[]
+  saleLines          SaleLine[]
+  transferLines      TransferRequestLine[]
+  purchaseOrderLines PurchaseOrderLine[]
+  receiptLines       ReceiptLine[]
+  promotions         Promotion[]
+
+  @@index([productId, active])
+  @@index([priceGroupId])
+  @@index([trackingMode])
+  @@index([supplierId])
+}
+
+// ---------------------------------------------------------------------------
+// Pricing
+// ---------------------------------------------------------------------------
+
+/// Shared pricing for weight-tracked goods. One "Flower" group means changing the
+/// flower price is a single edit rather than one per strain.
+model PriceGroup {
+  id   String @id @default(cuid())
+  name String
+  slug String @unique
+
+  /// Base rate applied below the lowest tier.
+  basePricePerGramCents Int
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tiers      PriceTier[]
+  variants   ProductVariant[]
+  promotions Promotion[]
+}
+
+/// Bulk break. Entered as a TOTAL PRICE at a THRESHOLD WEIGHT — an admin types what
+/// they actually think ("$30 for an eighth") — and applied as the per-gram rate that
+/// implies (3000 / 3.5 = 857 cents/g) to any weight from this threshold up to the
+/// next tier. At exactly 3.5g the customer pays exactly $30; at 5g they pay $42.85.
+/// The derived rate is computed by PricingService, never stored here.
+model PriceTier {
+  id           String     @id @default(cuid())
+  priceGroupId String
+  priceGroup   PriceGroup @relation(fields: [priceGroupId], references: [id], onDelete: Cascade)
+
+  /// Threshold in base units. 3500 == 3.5g.
+  minQuantityBase Int
+  totalPriceCents Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  saleLines SaleLine[]
+
+  @@unique([priceGroupId, minQuantityBase])
+  @@index([priceGroupId])
+}
+
+/// Automatic discount rule resolved server-side at cart time. Exactly one of the four
+/// scope FKs is set, matching scopeType — enforced by CHECK constraint in migration.
+/// Narrower scope wins: VARIANT > PRODUCT > CATEGORY > PRICE_GROUP.
+model Promotion {
+  id        String         @id @default(cuid())
+  name      String
+  scopeType PromotionScope
+
+  variantId    String?
+  variant      ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  productId    String?
+  product      Product?        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  categoryId   String?
+  category     Category?       @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  priceGroupId String?
+  priceGroup   PriceGroup?     @relation(fields: [priceGroupId], references: [id], onDelete: Cascade)
+
+  discountType DiscountType
+  /// Basis points for PERCENT_OFF, cents otherwise. See DiscountType.
+  value        Int
+
+  startsAt DateTime
+  endsAt   DateTime?
+
+  /// Non-stackable promotions do not combine — the narrowest-scoped one wins.
+  stackable Boolean @default(false)
+  active    Boolean @default(true)
+
+  createdById String?
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// No rows == every store. Rows == only those stores.
+  stores    PromotionStore[]
+  saleLines SaleLinePromotion[]
+
+  @@index([active, startsAt, endsAt])
+  @@index([scopeType])
+  @@index([variantId])
+  @@index([productId])
+  @@index([categoryId])
+  @@index([priceGroupId])
+}
+
+model PromotionStore {
+  promotionId String
+  promotion   Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  storeId     String
+  store       Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@id([promotionId, storeId])
+  @@index([storeId])
+}
+
+// ---------------------------------------------------------------------------
+// Inventory
+// ---------------------------------------------------------------------------
+
+/// Batch/lot traceability. Unused in v1 — the model and the nullable batchId columns
+/// exist from day one because retrofitting them later is a painful migration and
+/// adding them empty costs nothing.
+model Batch {
+  id        String         @id @default(cuid())
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+
+  lotNumber  String
+  coaUrl     String?
+  expiresAt  DateTime?
+  receivedAt DateTime  @default(now())
+  notes      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stockLevels  StockLevel[]
+  movements    InventoryMovement[]
+  receiptLines ReceiptLine[]
+
+  @@unique([variantId, lotNumber])
+  @@index([supplierId])
+  @@index([expiresAt])
+}
+
+/// On-hand quantity. Materialized and kept consistent by the inventory service —
+/// never UPDATEd from a route handler. The movement ledger is what an audit
+/// reconstructs from.
+model StockLevel {
+  id        String         @id @default(cuid())
+  storeId   String
+  store     Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  /// Reserved for batch tracking. Always null in v1.
+  batchId String?
+  batch   Batch?  @relation(fields: [batchId], references: [id], onDelete: Restrict)
+
+  /// Base units: items for EACH, milligrams for WEIGHT.
+  quantityBase     Int  @default(0)
+  reorderPointBase Int?
+
+  /// Weighted-average costing, per store: the TOTAL cost of the stock on hand here, in
+  /// whole cents. The average unit cost is derived (`costBasisCents / quantityBase`) rather
+  /// than stored, so it is re-rounded once at display instead of compounding a rounding
+  /// error on every receive.
+  ///
+  /// NULL means the cost is unknown — staff receive without cost and an admin enters it
+  /// afterward. That is a different fact from 0, which would claim the stock was free.
+  /// ADMIN-ONLY: must be stripped from any response to a staff principal.
+  costBasisCents Int?
+
+  updatedAt DateTime @updatedAt
+
+  /// v1 is one row per store/variant. When batch tracking is enabled this becomes
+  /// @@unique([storeId, variantId, batchId]) with NULLS NOT DISTINCT — plain Postgres
+  /// unique indexes treat NULLs as distinct, which would silently allow duplicates.
+  @@unique([storeId, variantId])
+  @@index([variantId])
+  @@index([storeId, quantityBase])
+}
+
+/// Append-only ledger. Every stock change writes a row in the SAME transaction that
+/// mutates StockLevel. Nothing deletes from this table.
+model InventoryMovement {
+  id        String         @id @default(cuid())
+  storeId   String
+  store     Store          @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  batchId   String?
+  batch     Batch?         @relation(fields: [batchId], references: [id], onDelete: Restrict)
+
+  type MovementType
+  /// SIGNED delta in base units. Negative for SALE, TRANSFER_OUT, SHRINKAGE.
+  quantityBase     Int
+  /// StockLevel.quantityBase immediately after this movement. Lets an audit verify
+  /// the ledger against the materialized column without replaying from zero.
+  balanceAfterBase Int
+
+  /// The unit cost this movement came in at — per item for EACH, per GRAM for WEIGHT.
+  /// Set on RECEIVE; null on movements that carry no new cost information.
+  /// ADMIN-ONLY: must be stripped from any response to a staff principal.
+  unitCostCents Int?
+  /// StockLevel.costBasisCents immediately after this movement — the cost counterpart of
+  /// balanceAfterBase, and what makes "why did the average cost move" answerable without
+  /// replaying the whole ledger.
+  /// ADMIN-ONLY: must be stripped from any response to a staff principal.
+  costBasisAfterCents Int?
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  /// Whichever one caused it.
+  saleId            String?
+  sale              Sale?            @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  transferRequestId String?
+  transferRequest   TransferRequest? @relation(fields: [transferRequestId], references: [id], onDelete: Restrict)
+  receiptId         String?
+  receipt           Receipt?         @relation(fields: [receiptId], references: [id], onDelete: Restrict)
+  refundId          String?
+  refund            Refund?          @relation(fields: [refundId], references: [id], onDelete: Restrict)
+
+  /// Why, as a queryable category — see ADJUSTMENT_REASONS in @huta/shared. Set on
+  /// ADJUSTMENT movements; null on the rest, where the movement type IS the reason.
+  reasonCode String?
+  /// Free-text detail alongside the category.
+  note       String?
+  createdAt  DateTime @default(now())
+
+  @@index([storeId, createdAt])
+  @@index([variantId, createdAt])
+  @@index([type, createdAt])
+  @@index([reasonCode, createdAt])
+  @@index([saleId])
+  @@index([receiptId])
+  @@index([transferRequestId])
+}
+
+// ---------------------------------------------------------------------------
+// Transfers
+// ---------------------------------------------------------------------------
+
+/// Request -> source store fulfills -> destination confirms receipt.
+/// Stock leaves the source on IN_TRANSIT and arrives at the destination on RECEIVED.
+/// In-transit stock belongs to neither store's sellable count.
+model TransferRequest {
+  id String @id @default(cuid())
+
+  requestingStoreId String
+  requestingStore   Store  @relation("RequestingStore", fields: [requestingStoreId], references: [id], onDelete: Restrict)
+  sourceStoreId     String
+  sourceStore       Store  @relation("SourceStore", fields: [sourceStoreId], references: [id], onDelete: Restrict)
+
+  requestedById String
+  requestedBy   User   @relation("TransferRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  status TransferStatus @default(PENDING)
+
+  acceptedById String?
+  acceptedBy   User?     @relation("TransferAcceptor", fields: [acceptedById], references: [id], onDelete: SetNull)
+  acceptedAt   DateTime?
+  shippedById  String?
+  shippedBy    User?     @relation("TransferShipper", fields: [shippedById], references: [id], onDelete: SetNull)
+  shippedAt    DateTime?
+  receivedById String?
+  receivedBy   User?     @relation("TransferReceiver", fields: [receivedById], references: [id], onDelete: SetNull)
+  receivedAt   DateTime?
+
+  declineReason String?
+  note          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines     TransferRequestLine[]
+  movements InventoryMovement[]
+
+  @@index([requestingStoreId, status])
+  @@index([sourceStoreId, status])
+  @@index([status, createdAt])
+}
+
+model TransferRequestLine {
+  id                String          @id @default(cuid())
+  transferRequestId String
+  transferRequest   TransferRequest @relation(fields: [transferRequestId], references: [id], onDelete: Cascade)
+  variantId         String
+  variant           ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  quantityRequestedBase Int
+  quantityApprovedBase  Int?
+  quantityReceivedBase  Int?
+
+  /// ADMIN-ONLY. The basis value relieved from the SOURCE at ship time — the value in
+  /// transit. The receive leg adds exactly this (proportionally, for a short receipt)
+  /// to the destination's basis, so cents are conserved across stores.
+  shippedCostCents Int?
+
+  @@unique([transferRequestId, variantId])
+  @@index([variantId])
+}
+
+// ---------------------------------------------------------------------------
+// Suppliers: ordering and receiving
+// ---------------------------------------------------------------------------
+
+/// An INTERNAL order log, not a document sent to the supplier. It exists so lead time
+/// (firstReceiptAt - orderedAt) is measurable — nothing else in the schema knows when
+/// an order was placed.
+model PurchaseOrder {
+  id         String   @id @default(cuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  storeId    String
+  store      Store    @relation(fields: [storeId], references: [id], onDelete: Restrict)
+
+  orderedById String
+  orderedBy   User   @relation(fields: [orderedById], references: [id], onDelete: Restrict)
+
+  status PurchaseOrderStatus @default(DRAFT)
+
+  /// Readable per-store order number — PO-0001, allocated from StoreCounter when the order
+  /// is PLACED, not when the draft is created. A number burned on an abandoned draft leaves
+  /// a gap in a sequence someone later reconciles against.
+  number Int?
+
+  orderedAt  DateTime
+  expectedAt DateTime?
+  /// Time to FIRST delivery.
+  firstReceiptAt   DateTime?
+  /// Time to FULL fulfillment. A partial that finishes three weeks later is not a
+  /// two-day lead time, so both are tracked.
+  fullyReceivedAt  DateTime?
+  cancelledAt      DateTime?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines    PurchaseOrderLine[]
+  receipts Receipt[]
+
+  @@unique([storeId, number])
+  @@index([supplierId, orderedAt])
+  @@index([storeId, status])
+  @@index([status])
+}
+
+model PurchaseOrderLine {
+  id              String         @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder  @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  variantId       String
+  variant         ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  /// Base units. Flower is ordered by weight through this same column.
+  quantityBase Int
+  /// ADMIN-ONLY. Cost per gram for WEIGHT variants.
+  unitCostCents Int?
+
+  @@unique([purchaseOrderId, variantId])
+  @@index([variantId])
+}
+
+/// An inbound delivery. Note the terminology: a Receipt is stock arriving from a
+/// supplier. The slip a customer walks out with is a sales receipt, printed from Sale.
+///
+/// Receiving is the one path that creates stock from nothing, so it is the primary
+/// fraud and data-error vector. Every receipt is permanently attributed.
+model Receipt {
+  id      String @id @default(cuid())
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Restrict)
+
+  /// Both nullable — unplanned deliveries, samples and walk-in reps are received
+  /// standalone. Only PO-linked receipts contribute to lead-time statistics.
+  supplierId      String?
+  supplier        Supplier?      @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  purchaseOrderId String?
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull)
+
+  receivedById String
+  receivedBy   User     @relation("ReceiptReceiver", fields: [receivedById], references: [id], onDelete: Restrict)
+  receivedAt   DateTime @default(now())
+
+  invoiceNumber String?
+  notes         String?
+
+  /// True when a PO-linked receipt does not match its order (over, short, or an
+  /// unexpected variant). Stock posts anyway; this flags it for admin review.
+  hasVariance  Boolean   @default(false)
+  reviewedById String?
+  reviewedBy   User?     @relation("ReceiptReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  lines     ReceiptLine[]
+  movements InventoryMovement[]
+
+  @@index([storeId, receivedAt])
+  @@index([supplierId, receivedAt])
+  @@index([purchaseOrderId])
+  @@index([hasVariance, reviewedAt])
+}
+
+model ReceiptLine {
+  id        String         @id @default(cuid())
+  receiptId String
+  receipt   Receipt        @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  batchId   String?
+  batch     Batch?         @relation(fields: [batchId], references: [id], onDelete: Restrict)
+
+  /// Base units. Staff key grams for flower; the client converts at the boundary.
+  quantityBase Int
+  /// ADMIN-ONLY: never returned to a staff principal. Defaults from the linked
+  /// PurchaseOrderLine when there is one; otherwise an admin sets it afterward.
+  unitCostCents Int?
+
+  @@index([receiptId])
+  @@index([variantId])
+}
+
+// ---------------------------------------------------------------------------
+// Shifts and cash
+// ---------------------------------------------------------------------------
+
+model Shift {
+  id      String @id @default(cuid())
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Restrict)
+
+  terminalId String?
+  terminal   Terminal? @relation(fields: [terminalId], references: [id], onDelete: SetNull)
+
+  openedById       String
+  openedBy         User     @relation("ShiftOpener", fields: [openedById], references: [id], onDelete: Restrict)
+  openedAt         DateTime @default(now())
+  openingCashCents Int
+
+  closedById              String?
+  closedBy                User?     @relation("ShiftCloser", fields: [closedById], references: [id], onDelete: SetNull)
+  closedAt                DateTime?
+  closingCountedCashCents Int?
+  /// Opening cash + cash sales + cash movements - cash refunds. Computed at close.
+  expectedCashCents       Int?
+  /// counted - expected. Negative is short. Never silently absorbed — this is a
+  /// reportable number.
+  varianceCents           Int?
+
+  status ShiftStatus @default(OPEN)
+  notes  String?
+
+  sales         Sale[]
+  cashMovements CashMovement[]
+  refunds       Refund[]
+
+  @@index([storeId, status])
+  @@index([storeId, openedAt])
+}
+
+model CashMovement {
+  id      String           @id @default(cuid())
+  shiftId String
+  shift   Shift            @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  type    CashMovementType
+  /// Always positive; the type determines direction.
+  amountCents Int
+  reason      String
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+
+  @@index([shiftId])
+}
+
+// ---------------------------------------------------------------------------
+// Customers and loyalty
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id          String    @id @default(cuid())
+  firstName   String
+  lastName    String
+  phone       String?   @unique
+  email       String?   @unique
+  dateOfBirth DateTime?
+  notes       String?
+
+  marketingEmailOptIn Boolean @default(false)
+  marketingSmsOptIn   Boolean @default(false)
+
+  active    Boolean  @default(true)
+  legacyId  String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  loyaltyAccount LoyaltyAccount?
+  sales          Sale[]
+
+  @@index([lastName, firstName])
+}
+
+model LoyaltyAccount {
+  id         String   @id @default(cuid())
+  customerId String   @unique
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  /// Materialized balances, kept consistent by the loyalty service alongside a
+  /// LoyaltyTransaction row in the same transaction. Same pattern as StockLevel.
+  pointsBalance    Int @default(0)
+  storeCreditCents Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions LoyaltyTransaction[]
+}
+
+/// Append-only.
+model LoyaltyTransaction {
+  id               String                 @id @default(cuid())
+  loyaltyAccountId String
+  loyaltyAccount   LoyaltyAccount         @relation(fields: [loyaltyAccountId], references: [id], onDelete: Cascade)
+  type             LoyaltyTransactionType
+
+  /// Signed deltas. Points for EARN/REDEEM/ADJUST, cents for CREDIT_*.
+  points      Int @default(0)
+  creditCents Int @default(0)
+
+  saleId String?
+  sale   Sale?   @relation(fields: [saleId], references: [id], onDelete: Restrict)
+
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([loyaltyAccountId, createdAt])
+  @@index([saleId])
+}
+
+// ---------------------------------------------------------------------------
+// Sales
+// ---------------------------------------------------------------------------
+
+model Sale {
+  id      String @id @default(cuid())
+  /// Human-readable receipt number, allocated per store from StoreCounter.
+  number  Int
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Restrict)
+
+  shiftId String
+  shift   Shift  @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  terminalId String?
+  terminal   Terminal? @relation(fields: [terminalId], references: [id], onDelete: SetNull)
+
+  cashierId String
+  cashier   User   @relation("SaleCashier", fields: [cashierId], references: [id], onDelete: Restrict)
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  subtotalCents Int
+  discountCents Int @default(0)
+  taxCents      Int
+  totalCents    Int
+  /// The store's tax rate AT TIME OF SALE. Changing a store's rate must never
+  /// alter a historical receipt.
+  taxRateBps    Int
+
+  status SaleStatus @default(COMPLETED)
+
+  /// Required on any sale containing a cannabinoid-bearing product. This is a
+  /// compliance record, not a UI-only prompt.
+  ageVerified       Boolean   @default(false)
+  ageVerifiedById   String?
+  ageVerifiedBy     User?     @relation("SaleAgeVerifier", fields: [ageVerifiedById], references: [id], onDelete: SetNull)
+
+  voidedAt   DateTime?
+  voidedById String?
+  voidedBy   User?     @relation("SaleVoider", fields: [voidedById], references: [id], onDelete: SetNull)
+  voidReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines              SaleLine[]
+  payments           Payment[]
+  refunds            Refund[]
+  movements          InventoryMovement[]
+  loyaltyTransactions LoyaltyTransaction[]
+
+  @@unique([storeId, number])
+  @@index([storeId, createdAt])
+  /// The transaction-history range with no store filter. [storeId, createdAt] cannot serve
+  /// it — the leading column is unconstrained — so an all-stores report would seq-scan.
+  @@index([createdAt])
+  @@index([shiftId])
+  @@index([cashierId, createdAt])
+  @@index([customerId])
+  @@index([status])
+}
+
+/// Everything price-related is SNAPSHOTTED here. Never join a historical sale to
+/// current variant prices, costs, suppliers, tiers or promotions — a price change or
+/// a supplier switch would silently rewrite history.
+model SaleLine {
+  id        String         @id @default(cuid())
+  saleId    String
+  sale      Sale           @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  /// Name snapshots so a renamed or deactivated product still prints correctly on a
+  /// reprinted receipt.
+  productNameSnapshot  String
+  variantLabelSnapshot String?
+  trackingMode         TrackingMode
+
+  /// Base units: items for EACH, milligrams for WEIGHT.
+  quantityBase Int
+
+  /// EACH lines set unitPriceCents. WEIGHT lines set pricePerGramCents. Storing a
+  /// single "price per base unit" would be fractional for weight ($8.57/g is 0.857
+  /// cents per mg), so the resolved rate is kept in its natural unit and grossCents
+  /// is the authoritative computed amount.
+  unitPriceCents    Int?
+  pricePerGramCents Int?
+
+  /// ADMIN-ONLY. Snapshotted so margin reporting is stable.
+  unitCostCents Int?
+  /// Resolved at sale time — from the batch when batch tracking is live, otherwise
+  /// from Product.primarySupplierId.
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+
+  /// Which pricing rules actually applied. Without these a receipt cannot be
+  /// explained after a price change and promo performance cannot be measured.
+  /// Only one tier can ever govern a weight, so this stays a single FK.
+  priceTierId String?
+  priceTier   PriceTier? @relation(fields: [priceTierId], references: [id], onDelete: SetNull)
+
+  /// Promotions are a LIST, not a single FK — see SaleLinePromotion. Stackable
+  /// promotions combine, so a line can carry several, and each one's contribution
+  /// has to be recorded separately or promo performance cannot be attributed.
+
+  /// grossCents = the authoritative pre-discount amount. NOT reproducible from
+  /// pricePerGramCents on a tiered line — extendTier charges the total the admin
+  /// typed at the threshold and floors just above it, so the rate is a rounded
+  /// description of the charge rather than its input. Never multiply it back.
+  /// netCents   = grossCents - discountCents.
+  /// Line total = netCents + taxCents.
+  grossCents    Int
+  discountCents Int @default(0)
+  netCents      Int
+  taxCents      Int @default(0)
+
+  refundedQuantityBase Int @default(0)
+
+  refundLines RefundLine[]
+  promotions  SaleLinePromotion[]
+
+  @@index([saleId])
+  @@index([variantId])
+  @@index([supplierId])
+}
+
+/// Every promotion that priced a sale line, and what each one took off.
+///
+/// A join rather than a column on SaleLine because "best outcome for the customer"
+/// combines stackable promotions, so several can apply to one line. A single FK would
+/// silently record only one of them and under-report every other promotion's
+/// performance — and none of this can be backfilled after the sale.
+model SaleLinePromotion {
+  saleLineId  String
+  saleLine    SaleLine  @relation(fields: [saleLineId], references: [id], onDelete: Cascade)
+  promotionId String
+  promotion   Promotion @relation(fields: [promotionId], references: [id], onDelete: Restrict)
+
+  /// What THIS promotion took off, after any applied before it. Zero for an
+  /// OVERRIDE_PRICE_PER_GRAM, whose effect is already inside grossCents as a
+  /// replaced rate rather than a subtraction.
+  discountCents Int
+
+  /// Application order, so a receipt can replay "10% off, then $5 off" exactly.
+  sequence Int
+
+  /// Snapshotted so a renamed or deleted promotion still prints correctly.
+  nameSnapshot String
+
+  @@id([saleLineId, promotionId])
+  @@index([promotionId])
+}
+
+/// Append-only. A sale may have several — split cash/card is supported.
+model Payment {
+  id     String @id @default(cuid())
+  saleId String
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Restrict)
+
+  method      PaymentMethod
+  amountCents Int
+  status      PaymentStatus @default(PENDING)
+
+  /// CARD only.
+  stripePaymentIntentId String? @unique
+  /// CARD only — from the retrieved intent, so the receipt can say "VISA ····4242".
+  cardBrand String?
+  cardLast4 String?
+  /// CASH only.
+  cashTenderedCents Int?
+  cashChangeCents   Int?
+
+  failureReason String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  refunds Refund[]
+
+  @@index([saleId])
+  @@index([method, createdAt])
+}
+
+/// Append-only. Sales are never deleted — they are voided or reversed.
+///
+/// A VOID writes Refund rows too (card-first for a split sale, so a split void is TWO
+/// rows with the RefundLines and movements attached to the first) — that keeps the
+/// drawer arithmetic uniform: the voided sale's cash payment still counts as cash taken
+/// and its cash refund subtracts. Reporting must not assume one refund carries lines.
+model Refund {
+  id        String  @id @default(cuid())
+  saleId    String
+  sale      Sale    @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  /// The drawer this refund pays out of. Set from the store's OPEN shift AT REFUND TIME
+  /// — a Tuesday cash refund of a Monday sale hits Tuesday's drawer. Cash refunds
+  /// REQUIRE an open shift; card refunds record one when open, else null.
+  shiftId String?
+  shift   Shift?  @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  refundedById String
+  refundedBy   User   @relation("RefundIssuer", fields: [refundedById], references: [id], onDelete: Restrict)
+  /// The admin whose step-up grant authorised this refund. Policy (2026-08-18): every
+  /// refund and void requires one — staff and admins alike.
+  approvedById String?
+  approvedBy   User?   @relation("RefundApprover", fields: [approvedById], references: [id], onDelete: Restrict)
+
+  method      PaymentMethod
+  amountCents Int
+  reason      String?
+
+  /// Reuses PaymentStatus. Cash refunds are born SUCCEEDED; card refunds are born
+  /// PENDING (record-first — a record with no money moved beats money moved with no
+  /// record), settle after the Stripe call, and are reconciled by the webhook.
+  status PaymentStatus @default(SUCCEEDED)
+
+  stripeRefundId String? @unique
+
+  createdAt DateTime @default(now())
+
+  lines     RefundLine[]
+  movements InventoryMovement[]
+
+  @@index([saleId])
+  @@index([shiftId])
+  /// Refunds are summed by their OWN date in the history totals (same rule as shiftId).
+  @@index([createdAt])
+}
+
+model RefundLine {
+  id         String   @id @default(cuid())
+  refundId   String
+  refund     Refund   @relation(fields: [refundId], references: [id], onDelete: Cascade)
+  saleLineId String
+  saleLine   SaleLine @relation(fields: [saleLineId], references: [id], onDelete: Restrict)
+
+  /// Base units returned to stock.
+  quantityBase Int
+  amountCents  Int
+  /// False for damaged/unsellable returns — no RETURN movement is written.
+  restock      Boolean @default(true)
+
+  @@index([refundId])
+  @@index([saleLineId])
+}
+
+// ---------------------------------------------------------------------------
+// Infrastructure
+// ---------------------------------------------------------------------------
+
+/// Stripe webhook idempotency. Stripe retries; handlers must not double-apply.
+model StripeEvent {
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now())
+  payload     Json
+
+  @@index([type, processedAt])
+}
+
+/// Admin actions worth explaining later — price changes, cost edits, stock
+/// adjustments, permission changes.
+model AuditLog {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  action     String
+  entityType String
+  entityId   String
+  before     Json?
+  after      Json?
+  ipAddress  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+}

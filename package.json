@@ -1,0 +1,21 @@
+{
+  "name": "huta-pos",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "check:templates": "node scripts/check-templates.cjs",
+    "check:imports": "node scripts/check-ui-imports.cjs",
+    "check:ui": "pnpm check:templates && pnpm check:imports"
+  }
+}

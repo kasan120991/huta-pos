@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "types": ["node"],
+    // The generated Prisma client carries @ts-nocheck and is excluded from emit checking,
+    // but its exported declarations still type-check normally at the call site.
+    "skipLibCheck": true
+  },
+  "include": ["src", "prisma.config.ts"],
+  "references": [{ "path": "../shared" }]
+}
