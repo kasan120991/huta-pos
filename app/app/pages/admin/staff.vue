@@ -1,10 +1,31 @@
 <script setup lang="ts">
 import type {
   CatalogReference,
+  ShiftListRow,
   StaffAdminRow,
   TimeEntryPage,
   TimeEntryRow,
 } from '@huta/shared/schemas'
+
+/** Shapes returned by GET /auth/users/:id/activity — server-side only, so declared here. */
+interface ActivityTotals {
+  saleCount: number
+  grossCents: number
+  averageSaleCents: number | null
+  drawersOpened: number
+  drawersClosed: number
+  refundsIssued: number
+  refundsApproved: number
+  stockMovements: number
+  cashMovements: number
+}
+interface AuditFeedRow {
+  id: string
+  action: string
+  entityType: string
+  entityId: string
+  at: string
+}
 import {
   AlertDialog,
   AlertDialogAction,
@@ -295,6 +316,157 @@ function confirmDeactivate() {
   if (person) void setActive(person, false)
 }
 
+/* ————— counters and history (Kasan's B, 2026-08-22) ————— */
+const totals = ref<ActivityTotals | null>(null)
+const feed = ref<AuditFeedRow[]>([])
+const drawers = ref<ShiftListRow[]>([])
+const historyLoading = ref(false)
+const historyFilter = ref<'all' | 'drawers' | 'admin'>('all')
+
+/**
+ * Counters live on OVERVIEW, not behind a tab — they are the part anyone actually looks at,
+ * and Overview was two small boxes on a full-width page. Loaded with the person, because
+ * they are part of the answer to "how is this person doing".
+ *
+ * ⚠️ Never call this from the INDEX. Ten people times six aggregates is sixty queries for a
+ * page that shows a table; the service comment says so too.
+ */
+async function loadPerson(userId: string) {
+  historyLoading.value = true
+  try {
+    const [activity, shifts] = await Promise.all([
+      apiFetch<{ totals: ActivityTotals, feed: AuditFeedRow[] }>(`/auth/users/${userId}/activity`),
+      apiFetch<{ shifts: ShiftListRow[] }>('/shifts', { query: { userId } }),
+    ])
+    if (selectedId.value !== userId) return // stale-response guard
+    totals.value = activity.totals
+    feed.value = activity.feed
+    drawers.value = shifts.shifts
+  }
+  catch (err) {
+    actionError.value = err instanceof ApiError ? err.message : 'Something went wrong.'
+  }
+  finally {
+    historyLoading.value = false
+  }
+}
+
+interface TimelineItem {
+  id: string
+  at: string
+  kind: 'drawer' | 'admin'
+  title: string
+  detail: string
+  short: boolean
+}
+
+/**
+ * Drawers and admin writes in ONE reverse-chronological list.
+ *
+ * They belong together: both answer "what did this person do", and a typical cashier has
+ * four of each — two half-empty tables, or one page worth reading. A drawer they both opened
+ * AND closed is one row at the open, not two, because it is one stretch of custody.
+ */
+const timeline = computed<TimelineItem[]>(() => {
+  const id = selectedId.value
+  const items: TimelineItem[] = []
+
+  if (historyFilter.value !== 'admin') {
+    for (const d of drawers.value) {
+      const opened = d.openedByName === fullNameOf(id)
+      const closed = d.closedByName !== null && d.closedByName === fullNameOf(id)
+      const variance
+        = d.varianceCents === null
+          ? d.status === 'OPEN' ? 'still open' : 'no variance recorded'
+          : d.varianceCents === 0
+            ? '$0.00'
+            : `${d.varianceCents > 0 ? '+' : '−'}${money(Math.abs(d.varianceCents))}`
+      items.push({
+        id: `shift-${d.id}`,
+        // Dated by the end of their involvement, so a drawer they closed sorts where they
+        // closed it rather than where someone else opened it.
+        at: closed && !opened && d.closedAt ? d.closedAt : d.openedAt,
+        kind: 'drawer',
+        title: opened && closed
+          ? `Opened and closed the ${d.storeName} drawer`
+          : opened
+            ? `Opened the ${d.storeName} drawer`
+            : `Closed the ${d.storeName} drawer`,
+        detail: `${d.saleCount} ${d.saleCount === 1 ? 'sale' : 'sales'} · ${variance}`,
+        short: (d.varianceCents ?? 0) < 0,
+      })
+    }
+  }
+
+  if (historyFilter.value !== 'drawers') {
+    for (const row of feed.value) {
+      items.push({
+        id: `audit-${row.id}`,
+        at: row.at,
+        kind: 'admin',
+        title: auditLabel(row.action),
+        detail: row.entityType,
+        short: false,
+      })
+    }
+  }
+
+  return items.sort((a, b) => b.at.localeCompare(a.at))
+})
+
+/** Grouped into days for the same reason the Hours tab is: a day is how people recall work. */
+const timelineDays = computed(() => {
+  const groups = new Map<string, { label: string, items: TimelineItem[] }>()
+  for (const item of timeline.value) {
+    const d = new Date(item.at)
+    const key = isoDay(d)
+    const g = groups.get(key) ?? {
+      label: d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }),
+      items: [],
+    }
+    g.items.push(item)
+    groups.set(key, g)
+  }
+  return [...groups.values()]
+})
+
+const fullNameOf = (id: string | null) => {
+  const p = people.value.find((x) => x.id === id)
+  return p ? `${p.firstName} ${p.lastName}` : ''
+}
+
+const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
+
+/**
+ * `catalog.variant.update` reads as machinery. This turns the dotted action into something
+ * a person recognises, and falls back to the raw string rather than hiding an action it does
+ * not know — a new one appearing unlabelled is better than it vanishing.
+ */
+const AUDIT_LABELS: Record<string, string> = {
+  'auth.terminal.create': 'Added a register',
+  'auth.terminal.update': 'Changed a register',
+  'auth.user.create': 'Added a staff member',
+  'auth.user.update': 'Edited a staff member',
+  'auth.user.resetPin': 'Reset a PIN',
+  'auth.user.clearLockout': 'Cleared a lockout',
+  'catalog.brand.create': 'Added a brand',
+  'catalog.product.create': 'Added a product',
+  'catalog.product.update': 'Edited a product',
+  'catalog.product.cannabinoids': 'Changed a product\u2019s potency',
+  'catalog.product.images': 'Changed product images',
+  'catalog.variant.create': 'Added a variant',
+  'catalog.variant.update': 'Edited a variant',
+  'catalog.variant.cannabinoids': 'Changed a strain\u2019s potency',
+  'inventory.adjust': 'Adjusted stock',
+  'inventory.cost': 'Costed a delivery',
+  'inventory.receive': 'Recorded a delivery',
+  'inventory.reconcileWeight': 'Reconciled flower weight',
+  'timeclock.correct': 'Corrected a time entry',
+  'timeclock.void': 'Voided a time entry',
+}
+
+const auditLabel = (action: string) => AUDIT_LABELS[action] ?? action
+
 /* ————— the Hours tab ————— */
 const hours = ref<TimeEntryPage | null>(null)
 const hoursLoading = ref(false)
@@ -394,10 +566,15 @@ async function saveFix() {
 }
 
 const tab = ref('overview')
-watch(selectedId, () => {
+watch(selectedId, (id) => {
   tab.value = 'overview'
   hours.value = null
-})
+  totals.value = null
+  feed.value = []
+  drawers.value = []
+  historyFilter.value = 'all'
+  if (id) void loadPerson(id)
+}, { immediate: true })
 watch([tab, range], () => {
   if (tab.value === 'hours' && selectedId.value) void loadHours(selectedId.value)
 })
@@ -562,9 +739,57 @@ watch([tab, range], () => {
         <TabsList variant="line">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger v-if="selected.role === 'STAFF'" value="hours">Hours</TabsTrigger>
+          <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" class="pt-4">
+          <!--
+            The counters live HERE rather than behind a tab (Kasan's B): they are the part
+            anyone actually looks at, and Overview was two small boxes on a full-width page.
+          -->
+          <div v-if="totals" class="mb-4 flex flex-wrap gap-3">
+            <div class="rounded-xl border px-4 py-3">
+              <p class="text-xl font-extrabold tabular-nums">{{ totals.saleCount }}</p>
+              <p class="text-xs text-muted-foreground">Sales rung</p>
+            </div>
+            <div class="rounded-xl border px-4 py-3">
+              <p class="text-xl font-extrabold tabular-nums">{{ money(totals.grossCents) }}</p>
+              <p class="text-xs text-muted-foreground">Gross</p>
+            </div>
+            <!--
+              A dash, not $0.00, when there are no sales — the server returns null because an
+              average over nothing is unanswerable. And it carries its sample size, the rule
+              the suppliers scorecard set.
+            -->
+            <div class="rounded-xl border px-4 py-3">
+              <p class="text-xl font-extrabold tabular-nums" :class="totals.averageSaleCents === null ? 'text-muted-foreground' : ''">
+                {{ totals.averageSaleCents === null ? '—' : money(totals.averageSaleCents) }}
+              </p>
+              <p class="text-xs text-muted-foreground">
+                Average sale<template v-if="totals.saleCount > 0"> · over {{ totals.saleCount }}</template>
+              </p>
+            </div>
+            <!-- Custody, never hours. A drawer belongs to a store; hours live in the Hours tab. -->
+            <div class="rounded-xl border px-4 py-3">
+              <p class="text-xl font-extrabold tabular-nums">
+                {{ totals.drawersOpened }} / {{ totals.drawersClosed }}
+              </p>
+              <p class="text-xs text-muted-foreground">Drawers opened / closed</p>
+            </div>
+            <div v-if="totals.refundsIssued > 0 || totals.refundsApproved > 0" class="rounded-xl border px-4 py-3">
+              <p class="text-xl font-extrabold tabular-nums">
+                {{ totals.refundsIssued }}<template v-if="totals.refundsApproved > 0"> / {{ totals.refundsApproved }}</template>
+              </p>
+              <p class="text-xs text-muted-foreground">
+                Refunds issued<template v-if="totals.refundsApproved > 0"> / approved</template>
+              </p>
+            </div>
+            <div class="rounded-xl border px-4 py-3">
+              <p class="text-xl font-extrabold tabular-nums">{{ totals.stockMovements }}</p>
+              <p class="text-xs text-muted-foreground">Stock movements</p>
+            </div>
+          </div>
+
           <div class="grid gap-4 md:grid-cols-2">
             <div class="rounded-xl border p-4">
               <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Identity</p>
@@ -722,6 +947,78 @@ watch([tab, range], () => {
             Some entries have no clock-out and were closed at the 12-hour cutoff. Those hours
             are a guess until you set the real time.
           </p>
+        </TabsContent>
+
+        <!--
+          ONE timeline, not a Drawers table and an Activity table. A typical cashier has four
+          drawers and four audit rows — two half-empty tables, or one page worth reading. The
+          chips are what compensates for two shapes of row sharing a list.
+        -->
+        <TabsContent value="history" class="pt-4">
+          <div class="mb-4 flex flex-wrap items-center gap-3">
+            <ToggleGroup
+              :model-value="historyFilter"
+              type="single"
+              :spacing="2"
+              aria-label="What to show"
+              class="flex-wrap"
+              @update:model-value="(v) => v && (historyFilter = v as typeof historyFilter)"
+            >
+              <ToggleGroupItem
+                v-for="f in [
+                  { key: 'all', label: 'Everything' },
+                  { key: 'drawers', label: 'Drawers' },
+                  { key: 'admin', label: 'Admin edits' },
+                ]"
+                :key="f.key"
+                :value="f.key"
+                class="inline-flex h-9 items-center rounded-lg border border-dashed border-input px-3 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground data-[state=on]:border-solid data-[state=on]:border-primary/50 data-[state=on]:bg-transparent data-[state=on]:text-foreground"
+              >
+                {{ f.label }}
+              </ToggleGroupItem>
+            </ToggleGroup>
+            <Spinner v-if="historyLoading" aria-hidden="true" class="text-muted-foreground" />
+          </div>
+
+          <div v-if="timelineDays.length" class="flex flex-col">
+            <template v-for="day in timelineDays" :key="day.label">
+              <p class="mt-4 border-b pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground first:mt-0">
+                {{ day.label }}
+              </p>
+              <div
+                v-for="item in day.items"
+                :key="item.id"
+                class="flex items-baseline gap-3 border-b py-2.5 text-sm"
+              >
+                <span
+                  class="mt-1.5 size-2 shrink-0 rounded-full"
+                  :class="item.kind === 'drawer' ? 'bg-amber-500' : 'bg-sky-500'"
+                  aria-hidden="true"
+                />
+                <span class="w-20 shrink-0 tabular-nums text-muted-foreground">
+                  {{ clockTime(item.at) }}
+                </span>
+                <span class="min-w-0 flex-1">{{ item.title }}</span>
+                <span
+                  class="shrink-0 text-xs tabular-nums"
+                  :class="item.short ? 'font-semibold text-destructive' : 'text-muted-foreground'"
+                >
+                  {{ item.detail }}
+                </span>
+              </div>
+            </template>
+          </div>
+
+          <Empty v-else-if="!historyLoading" class="flex-none border">
+            <EmptyHeader>
+              <EmptyMedia variant="icon"><Clock /></EmptyMedia>
+              <EmptyTitle>Nothing recorded yet</EmptyTitle>
+              <EmptyDescription>
+                Drawers they opened or closed, and any changes they made in the back office,
+                appear here.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         </TabsContent>
       </Tabs>
     </template>
