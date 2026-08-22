@@ -292,6 +292,55 @@ function ladderRows(variant: CatalogVariant) {
   ]
 }
 
+/**
+ * The SELECTED variant's resolved identity, never the product's own columns.
+ *
+ * The detail payload ships `variant.identity` — the server has already applied the
+ * variant → product fallback (scalars field by field, the cannabinoid list all-or-nothing)
+ * so no client re-implements the rule. This screen used to read `detail.strainType`,
+ * `detail.nose` and `detail.cannabinoids` directly, which is correct only while no strain
+ * owns anything: the first strain filled in through StrainDialog would have kept showing
+ * the shelf's values at the counter. Falls back to the product for a payload without it.
+ */
+const identity = computed(() => selectedVariant.value?.identity ?? null)
+
+const potencyLinks = computed(
+  () => identity.value?.cannabinoids ?? detail.value?.cannabinoids ?? [],
+)
+const strainType = computed(() => identity.value?.strainType ?? detail.value?.strainType ?? null)
+const nose = computed(() => identity.value?.nose ?? detail.value?.nose ?? null)
+const terpenes = computed(
+  () => identity.value?.terpeneProfile ?? detail.value?.terpeneProfile ?? null,
+)
+const coaUrl = computed(() => identity.value?.coaUrl ?? detail.value?.coaUrl ?? null)
+const description = computed(
+  () => identity.value?.description ?? detail.value?.description ?? null,
+)
+
+/**
+ * What to call the thing in the header.
+ *
+ * The same rule the transfers fill sheet uses: on flower the VARIANT is the identity
+ * ("Blue Dream"), on a packaged good the label is a size and "1000mg" names nothing. So a
+ * WEIGHT variant with a label titles the pane; everything else uses the product name.
+ */
+const drawerTitle = computed(() => {
+  const v = selectedVariant.value
+  if (v?.trackingMode === 'WEIGHT' && v.label) return v.label
+  return detail.value?.name ?? ''
+})
+
+const drawerSubtitle = computed(() => {
+  const d = detail.value
+  if (!d) return ''
+  const v = selectedVariant.value
+  const parts
+    = v?.trackingMode === 'WEIGHT' && v.label
+      ? [d.name, strainType.value?.toLowerCase()]
+      : [d.category.name, d.brand?.name, strainType.value?.toLowerCase()]
+  return parts.filter(Boolean).join(' · ')
+})
+
 function ringUp(variantId: string) {
   if (!detail.value) return
   void router.push({
@@ -490,66 +539,95 @@ const detailImage = computed(() => {
           <Spinner aria-hidden="true" />Loading…
         </p>
 
-        <div v-else-if="detail" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4" :class="loadingDetail ? 'opacity-60' : ''">
-          <div class="flex items-start gap-3">
-            <div class="min-w-0 flex-1">
-              <h2 class="text-lg font-extrabold leading-tight tracking-tight">{{ detail.name }}</h2>
-              <p class="mt-0.5 text-xs text-muted-foreground">
-                {{ [detail.category.name, detail.brand?.name, detail.strainType?.toLowerCase()].filter(Boolean).join(' · ') }}
+        <!--
+          Option A (Kasan, 2026-08-22): THREE ANCHORED ZONES — a header that does not move,
+          a middle that scrolls, and an action bar pinned to the bottom.
+
+          The defect this fixes: "Ring it up" used to sit in the content flow, so it landed
+          at 245px on a single-variant product and 494px on flower — a 250px swing on the one
+          control that matters. The house pattern already exists (the house rules on
+          `ReceiptCounter`: the action bar spans the pane at the bottom "so the button is in
+          the same place whether a sale has one line or nine").
+
+          Measured alongside: the pane runs 48-72% empty, because it reserves structure for
+          content the catalogue does not have — 2 descriptions and 0 COAs across 286 active
+          products. Those two blocks stay conditional and last; they must never shape the
+          layout for the 284 products that lack them.
+        -->
+        <div v-else-if="detail" class="flex min-h-0 flex-1 flex-col" :class="loadingDetail ? 'opacity-60' : ''">
+
+          <!-- ZONE 1 — fixed. Identity and the price, answerable without reading down. -->
+          <div class="flex shrink-0 flex-col gap-2 border-b p-4">
+            <div class="flex items-start gap-3">
+              <div class="min-w-0 flex-1">
+                <h2 class="text-lg font-extrabold leading-tight tracking-tight">{{ drawerTitle }}</h2>
+                <p class="mt-0.5 text-xs text-muted-foreground">{{ drawerSubtitle }}</p>
+              </div>
+              <span class="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-accent/60">
+                <img v-if="detailImage" :src="detailImage" :alt="detail.name" class="size-full object-cover" @error="detailImage && brokenImages.add(detailImage)" />
+                <span v-else class="text-lg font-extrabold text-muted-foreground/50">{{ detail.name.charAt(0) }}</span>
+              </span>
+            </div>
+
+            <!--
+              An EACH price IS the whole answer, so it is the biggest thing here. A WEIGHT
+              rate deliberately is NOT: "$10.00/g" read alone and multiplied is exactly the
+              mistake that misquoted an eighth by $5, so it stays small, says "from", and
+              hands off to the ladder below.
+            -->
+            <template v-if="selectedVariant">
+              <p v-if="selectedVariant.trackingMode === 'WEIGHT'" class="text-sm font-semibold tabular-nums text-muted-foreground">
+                from <span class="text-primary">{{ variantPriceText(selectedVariant) }}</span>
               </p>
-            </div>
-            <span class="flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-accent/60">
-              <img v-if="detailImage" :src="detailImage" :alt="detail.name" class="h-full w-full object-cover" @error="detailImage && brokenImages.add(detailImage)" />
-              <span v-else class="text-xl font-extrabold text-muted-foreground/50">{{ detail.name.charAt(0) }}</span>
-            </span>
+              <p v-else class="text-2xl font-extrabold leading-none tracking-tight tabular-nums text-primary">
+                {{ variantPriceText(selectedVariant) }}
+              </p>
+            </template>
           </div>
 
-          <div v-if="detail.cannabinoids.length || detail.nose" class="flex flex-wrap gap-1.5">
-            <span
-              v-for="link in detail.cannabinoids"
-              :key="link.cannabinoid.id"
-              class="rounded-full bg-primary/12 px-2 py-0.5 text-[11px] font-semibold text-primary"
-            >
-              {{ potencyLabel(link) }}
-            </span>
-            <span v-if="detail.nose" class="rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-              nose: {{ detail.nose }}
-            </span>
-            <span v-if="detail.terpeneProfile" class="rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-              {{ detail.terpeneProfile }}
-            </span>
-          </div>
-
-          <!--
-            Option A's inspector: pick an option, always get the full block. See
-            `selectedVariantId` for why the old single-variant gate was a money bug.
-          -->
-          <div v-if="detail.variants.length > 1" class="flex flex-col gap-1.5">
-            <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              {{ detail.category.name === 'Flower' ? 'Strains' : 'Options' }} · {{ detail.variants.length }}
-            </p>
-            <div class="flex flex-wrap gap-1.5">
-              <button
-                v-for="variant in detail.variants"
-                :key="variant.id"
-                type="button"
-                class="min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-semibold transition-colors"
-                :class="variant.id === selectedVariant?.id
-                  ? 'border-primary/60 bg-primary/12 text-primary'
-                  : 'text-muted-foreground hover:border-primary/40 hover:bg-accent/40'"
-                :aria-pressed="variant.id === selectedVariant?.id"
-                @click="selectedVariantId = variant.id"
+          <!-- ZONE 2 — scrolls if it ever needs to. -->
+          <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+            <div v-if="potencyLinks.length || nose || terpenes" class="flex flex-wrap gap-1.5">
+              <span
+                v-for="link in potencyLinks"
+                :key="link.cannabinoid.id"
+                class="rounded-full bg-primary/12 px-2 py-0.5 text-[11px] font-semibold text-primary"
               >
-                {{ variant.label ?? detail.name }}
-                <span class="block text-[11px] font-medium tabular-nums opacity-70">
-                  {{ variantPriceText(variant) }}
-                </span>
-              </button>
+                {{ potencyLabel(link) }}
+              </span>
+              <span v-if="nose" class="rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                nose: {{ nose }}
+              </span>
+              <span v-if="terpenes" class="rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                {{ terpenes }}
+              </span>
             </div>
-          </div>
 
-          <template v-if="selectedVariant">
-            <div class="flex flex-col gap-3">
+            <div v-if="detail.variants.length > 1" class="flex flex-col gap-1.5">
+              <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {{ detail.category.name === 'Flower' ? 'Strains' : 'Options' }} · {{ detail.variants.length }}
+              </p>
+              <div class="flex flex-wrap gap-1.5">
+                <button
+                  v-for="variant in detail.variants"
+                  :key="variant.id"
+                  type="button"
+                  class="min-h-11 rounded-xl border px-3 py-2 text-left text-sm font-semibold transition-colors"
+                  :class="variant.id === selectedVariant?.id
+                    ? 'border-primary/60 bg-primary/12 text-primary'
+                    : 'text-muted-foreground hover:border-primary/40 hover:bg-accent/40'"
+                  :aria-pressed="variant.id === selectedVariant?.id"
+                  @click="selectedVariantId = variant.id"
+                >
+                  {{ variant.label ?? detail.name }}
+                  <span class="block text-[11px] font-medium tabular-nums opacity-70">
+                    {{ variantPriceText(variant) }}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <template v-if="selectedVariant">
               <div v-if="selectedVariant.trackingMode === 'WEIGHT' && selectedVariant.priceGroup">
                 <p class="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Price ladder</p>
                 <div class="flex flex-col gap-1">
@@ -562,19 +640,6 @@ const detailImage = computed(() => {
                     <span class="font-bold tabular-nums">{{ fmt(row.priceCents) }}</span>
                   </div>
                 </div>
-              </div>
-              <!--
-                Only when there is no option picker above. With one, the pill already
-                carries this variant's label and price, and repeating them here says the
-                same thing twice. A WEIGHT variant is different — the ladder above is not
-                what the pill shows — so it always renders.
-              -->
-              <div
-                v-else-if="detail.variants.length === 1"
-                class="flex items-center justify-between rounded-lg border bg-background/60 px-3 py-2"
-              >
-                <span class="text-sm">{{ selectedVariant.label ?? 'Price' }}</span>
-                <span class="text-base font-bold tabular-nums text-primary">{{ variantPriceText(selectedVariant) }}</span>
               </div>
 
               <div>
@@ -597,24 +662,29 @@ const detailImage = computed(() => {
                   </div>
                 </div>
               </div>
+            </template>
 
-              <Button class="h-12 text-base font-bold" @click="ringUp(selectedVariant.id)">Ring it up →</Button>
-            </div>
-          </template>
+            <p v-if="description" class="text-sm leading-relaxed text-muted-foreground">
+              {{ description }}
+            </p>
 
-          <p v-if="detail.description" class="text-sm leading-relaxed text-muted-foreground">
-            {{ detail.description }}
-          </p>
+            <a
+              v-if="coaUrl"
+              :href="coaUrl"
+              target="_blank"
+              rel="noopener"
+              class="flex items-center gap-1.5 text-sm text-primary underline underline-offset-2 hover:no-underline"
+            >
+              Certificate of analysis <ExternalLink class="size-3.5" />
+            </a>
+          </div>
 
-          <a
-            v-if="detail.coaUrl"
-            :href="detail.coaUrl"
-            target="_blank"
-            rel="noopener"
-            class="flex items-center gap-1.5 text-sm text-primary underline underline-offset-2 hover:no-underline"
-          >
-            Certificate of analysis <ExternalLink class="size-3.5" />
-          </a>
+          <!-- ZONE 3 — pinned. One target, same place, every product. -->
+          <div v-if="selectedVariant" class="shrink-0 border-t p-4">
+            <Button class="h-12 w-full text-base font-bold" @click="ringUp(selectedVariant.id)">
+              Ring it up →
+            </Button>
+          </div>
         </div>
       </aside>
     </div>
