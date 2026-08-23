@@ -419,6 +419,7 @@ const kpis = computed(() => [
     <CatalogPanel
       :product-id="selectedProductId"
       :store-id="storeId"
+      :stores="reference?.stores ?? []"
       @close="selectedProductId = null"
     />
 
