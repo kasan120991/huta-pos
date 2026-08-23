@@ -375,7 +375,13 @@ async function saveSupplier() {
 
 /* ————— active / inactive ————— */
 
+/**
+ * ⚠️ Open state is a SEPARATE ref from the row. reka's `AlertDialogAction` closes the dialog
+ * on click, and that close fires `@update:open` before the fallthrough `@click` — so one ref
+ * doing both jobs was nulled first and the action silently short-circuited. See registers.vue.
+ */
 const deactivateTarget = ref<SupplierRow | null>(null)
+const deactivateOpen = ref(false)
 const toggling = ref(false)
 
 async function setActive(row: SupplierRow, active: boolean) {
@@ -385,7 +391,7 @@ async function setActive(row: SupplierRow, active: boolean) {
   try {
     await apiFetch(`/suppliers/${row.id}`, { method: 'PATCH', body: { active } })
     await fetchSuppliers()
-    deactivateTarget.value = null
+    deactivateOpen.value = false
   } catch (err) {
     pageError.value = err instanceof ApiError ? err.message : 'Something went wrong.'
   } finally {
@@ -487,7 +493,7 @@ async function setActive(row: SupplierRow, active: boolean) {
             v-if="selected.active"
             variant="outline"
             class="border-red-400/40 text-red-400 hover:bg-red-400/10 hover:text-red-400"
-            @click="deactivateTarget = selected"
+            @click="deactivateTarget = selected; deactivateOpen = true"
           >
             Deactivate
           </Button>
@@ -944,7 +950,7 @@ async function setActive(row: SupplierRow, active: boolean) {
       click, so a failure surfaces on the page behind rather than behind a stuck dialog —
       which is what used to happen.
     -->
-    <AlertDialog :open="deactivateTarget !== null" @update:open="(o: boolean) => !o && (deactivateTarget = null)">
+    <AlertDialog v-model:open="deactivateOpen">
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Deactivate {{ deactivateTarget?.name }}?</AlertDialogTitle>

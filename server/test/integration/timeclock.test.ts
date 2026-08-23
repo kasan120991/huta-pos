@@ -291,3 +291,89 @@ describe('timeclock', () => {
     expect(await currentEntry(admin)).toBeNull()
   })
 })
+
+/**
+ * ⚠️ The regression Kasan reported as two bugs: "on the clock" not showing in the back office,
+ * and clocked-out hours "not recording".
+ *
+ * Both were ONE read bug and neither lost data. `listEntries` built its range with
+ * `new Date('2026-08-22')` — and a bare `YYYY-MM-DD` is parsed as UTC MIDNIGHT by spec, so the
+ * business day ended at 20:00 Eastern. Anything clocked after that fell into "tomorrow" and
+ * dropped out of the range, taking `openCount` with it (it is counted over the same rows).
+ *
+ * Honolulu is UTC−10, so 06:00 UTC on the 21st is 20:00 on the 20th there — an instant whose
+ * UTC date and store date differ. No UTC-boundary implementation can satisfy this.
+ */
+describe('timeclock business days', () => {
+  let storeId: string
+  let staff: StaffPrincipal
+  let staffId: string
+  let admin: AdminPrincipal
+
+  beforeEach(async () => {
+    await resetDatabase()
+    const store = await makeStore('Honolulu', 'honolulu', 'Pacific/Honolulu')
+    storeId = store.id
+    const terminal = await makeTerminal(storeId, 'device-token-tz')
+    const person = await makeStaff(storeId, '1111')
+    staffId = person.id
+    staff = { kind: 'staff', userId: person.id, role: 'STAFF', storeId, terminalId: terminal.id }
+    const a = await makeAdmin()
+    admin = { kind: 'admin', userId: a.id, role: 'ADMIN', storeId: null, terminalId: null }
+  })
+
+  /** 2026-08-21T06:00Z is 2026-08-20 20:00 in Honolulu — an evening shift, the day before. */
+  const EVENING = new Date('2026-08-21T06:00:00Z')
+
+  it('keeps an evening entry on the store\'s day, not UTC\'s', async () => {
+    const entry = await clockIn(staff)
+    await prisma.timeEntry.update({ where: { id: entry.id }, data: { clockedInAt: EVENING } })
+
+    const onStoreDay = await listEntries(admin, { userId: staffId, from: '2026-08-20', to: '2026-08-20' })
+    expect(onStoreDay.entries).toHaveLength(1)
+
+    // ...and it is NOT on the 21st, which is only where UTC would have put it.
+    const onUtcDay = await listEntries(admin, { userId: staffId, from: '2026-08-21', to: '2026-08-21' })
+    expect(onUtcDay.entries).toHaveLength(0)
+  })
+
+  /**
+   * The first of the two reported symptoms. `openCount` is derived from the ranged rows, so a
+   * person clocked in during the evening read as NOT on the clock.
+   *
+   * Uses a LIVE entry, not a backdated one: `listEntries` calls `resolveAbandoned` first, and
+   * anything older than the 12h cutoff is legitimately auto-closed, so a backdated entry can
+   * never be OPEN. The store's current business day is computed the way the store sees it,
+   * which is exactly the question the back office asks.
+   */
+  it('still counts someone as ON THE CLOCK today, in the store\'s day', async () => {
+    await clockIn(staff)
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Pacific/Honolulu',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date())
+
+    const page = await listEntries(admin, { userId: staffId, from: today, to: today })
+    expect(page.entries).toHaveLength(1)
+    expect(page.openCount).toBe(1)
+  })
+
+  /** The second symptom: finished hours vanishing from the Hours tab. */
+  it('reports the minutes of an evening entry that has been clocked out', async () => {
+    const entry = await clockIn(staff)
+    await prisma.timeEntry.update({
+      where: { id: entry.id },
+      data: {
+        clockedInAt: EVENING,
+        clockedOutAt: new Date(EVENING.getTime() + 90 * 60_000),
+        status: 'CLOCKED',
+      },
+    })
+
+    const page = await listEntries(admin, { userId: staffId, from: '2026-08-20', to: '2026-08-20' })
+    expect(page.entries).toHaveLength(1)
+    expect(page.totalMinutes).toBe(90)
+  })
+})

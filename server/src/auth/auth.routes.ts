@@ -288,8 +288,9 @@ authRouter.post('/users/:id/unlock', requireAdmin, validateParams(userIdParam), 
 })
 
 const activityQuery = z.object({
-  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  // `z.iso.date()`, not a regex: the regex form accepted `2026-99-99`.
+  from: z.iso.date().optional(),
+  to: z.iso.date().optional(),
 })
 
 authRouter.get(

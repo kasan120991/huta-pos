@@ -277,7 +277,14 @@ async function copyPin() {
 /* ————— per-person actions ————— */
 const actionError = ref<string | null>(null)
 const busy = ref(false)
+/**
+ * ⚠️ Open state is a SEPARATE ref from the person. reka's `AlertDialogAction` closes the
+ * dialog on click, and that close fires `@update:open` before the handler runs — so reading
+ * `deactivating.value` inside `confirmDeactivate` found null and did nothing at all. See
+ * registers.vue for the full account.
+ */
 const deactivating = ref<StaffAdminRow | null>(null)
+const deactivateOpen = ref(false)
 
 async function act(fn: () => Promise<unknown>) {
   if (busy.value) return
@@ -313,7 +320,7 @@ const setActive = (person: StaffAdminRow, active: boolean) =>
 
 function confirmDeactivate() {
   const person = deactivating.value
-  deactivating.value = null
+  deactivateOpen.value = false
   if (person) void setActive(person, false)
 }
 
@@ -703,7 +710,7 @@ watch([tab, range], () => {
           <Button variant="outline" :disabled="busy || !selected.active" @click="resetPin(selected)">
             Reset PIN
           </Button>
-          <Button v-if="selected.active" variant="outline" class="text-destructive" :disabled="busy" @click="deactivating = selected">
+          <Button v-if="selected.active" variant="outline" class="text-destructive" :disabled="busy" @click="deactivating = selected; deactivateOpen = true">
             Deactivate
           </Button>
           <Button v-else :disabled="busy" @click="setActive(selected, true)">Reactivate</Button>
@@ -1152,7 +1159,7 @@ watch([tab, range], () => {
     </Dialog>
 
     <!-- ─────────────── deactivate ─────────────── -->
-    <AlertDialog :open="deactivating !== null" @update:open="(o: boolean) => !o && (deactivating = null)">
+    <AlertDialog v-model:open="deactivateOpen">
       <AlertDialogContent class="sm:max-w-sm">
         <AlertDialogHeader>
           <AlertDialogTitle>Deactivate {{ deactivating ? fullName(deactivating) : '' }}?</AlertDialogTitle>

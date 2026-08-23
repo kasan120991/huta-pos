@@ -1,6 +1,7 @@
 import type { Principal } from '../auth/principal.js'
 import { assertCan } from '../auth/permissions.js'
 import { prisma } from '../db/client.js'
+import { dayRange, scopeTimezone } from '../lib/business-day.js'
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors/index.js'
 
 /**
@@ -212,19 +213,30 @@ export async function listEntries(principal: Principal, filter: EntryFilter) {
   assertCan(principal, 'user.manage')
   await resolveAbandoned(filter.userId)
 
+  /**
+   * ⚠️ Days are cut in the STORE's timezone, and getting this wrong hid people's hours.
+   *
+   * This used `new Date(filter.from)` on a bare `YYYY-MM-DD`, which JavaScript parses as UTC
+   * MIDNIGHT — so the business day ended at 20:00 Eastern and everything clocked after that
+   * fell into "tomorrow" and vanished from the range. Two consequences, both reported as
+   * separate bugs: a person clocked in at 21:38 showed as NOT on the clock (`openCount` is
+   * counted over these same rows), and their finished entries disappeared from the Hours tab
+   * as though the hours had never been recorded. They always were; only the read was wrong.
+   *
+   * Worse than the `listShifts` version of this bug, which at least used the SERVER's zone —
+   * a bare date string is UTC by spec, so this was wrong even with the server set to Eastern.
+   * Third caller of the same rule; `lib/business-day.ts` exists so there is no fourth.
+   */
+  const stores = await prisma.store.findMany({
+    where: { active: true },
+    select: { id: true, name: true, timezone: true },
+  })
+  const range = dayRange(filter.from, filter.to, scopeTimezone(stores))
+
   const entries = await prisma.timeEntry.findMany({
     where: {
       ...(filter.userId ? { userId: filter.userId } : {}),
-      ...(filter.from || filter.to
-        ? {
-            clockedInAt: {
-              ...(filter.from ? { gte: new Date(filter.from) } : {}),
-              // Half-open: a `lte` against midnight drops everything after 00:00 on the
-              // end date, the same trap the sales history documents.
-              ...(filter.to ? { lt: new Date(new Date(filter.to).getTime() + 86_400_000) } : {}),
-            },
-          }
-        : {}),
+      ...(range ? { clockedInAt: range } : {}),
       status: { not: 'VOIDED' },
     },
     select: entrySelect,

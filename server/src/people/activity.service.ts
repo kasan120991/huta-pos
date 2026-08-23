@@ -1,6 +1,7 @@
 import type { Principal } from '../auth/principal.js'
 import { assertCan } from '../auth/permissions.js'
 import { prisma } from '../db/client.js'
+import { dayRange, scopeTimezone } from '../lib/business-day.js'
 
 /**
  * What a person has actually done — the Overview and Activity tabs on the Staff page.
@@ -33,24 +34,27 @@ export interface ActivityRange {
 
 /**
  * A date filter on whatever column carries the time for that model — `createdAt` for most,
- * `openedAt` / `closedAt` for a Shift. Half-open, like everywhere else that buckets by day:
- * a `lte` against midnight drops everything after 00:00 on the end date.
+ * `openedAt` / `closedAt` for a Shift.
+ *
+ * Cut in the STORE's timezone via the shared helper. This used to build the boundary itself
+ * and got it wrong in the server's zone; the same mistake in `timeclock.service.ts` hid
+ * people's hours, because a day that ends at 20:00 Eastern drops the evening. No caller
+ * passes a range today, so this one never bit — fixed anyway, since the next caller would
+ * inherit it silently.
  */
-function rangeOn(field: string, range: ActivityRange): Record<string, unknown> {
-  if (!range.from && !range.to) return {}
-  return {
-    [field]: {
-      ...(range.from ? { gte: new Date(`${range.from}T00:00:00`) } : {}),
-      ...(range.to
-        ? { lt: new Date(new Date(`${range.to}T00:00:00`).getTime() + 86_400_000) }
-        : {}),
-    },
-  }
+function rangeOn(field: string, range: ActivityRange, timeZone: string): Record<string, unknown> {
+  const window = dayRange(range.from, range.to, timeZone)
+  return window ? { [field]: window } : {}
 }
 
 export async function activityFor(principal: Principal, userId: string, range: ActivityRange) {
   assertCan(principal, 'user.manage')
-  const when = rangeOn('createdAt', range)
+  const stores = await prisma.store.findMany({
+    where: { active: true },
+    select: { id: true, name: true, timezone: true },
+  })
+  const timeZone = scopeTimezone(stores)
+  const when = rangeOn('createdAt', range, timeZone)
 
   // Six queries, fired together. Not a transaction — nothing here writes, and a read-only
   // snapshot across counters buys nothing anyone would notice.
@@ -63,8 +67,8 @@ export async function activityFor(principal: Principal, userId: string, range: A
       }),
       // A drawer is dated by when it was OPENED and when it was CLOSED — different columns,
       // and a shift opened Monday and closed Tuesday genuinely belongs to both days.
-      prisma.shift.count({ where: { openedById: userId, ...rangeOn('openedAt', range) } }),
-      prisma.shift.count({ where: { closedById: userId, ...rangeOn('closedAt', range) } }),
+      prisma.shift.count({ where: { openedById: userId, ...rangeOn('openedAt', range, timeZone) } }),
+      prisma.shift.count({ where: { closedById: userId, ...rangeOn('closedAt', range, timeZone) } }),
       prisma.refund.count({ where: { refundedById: userId, ...when } }),
       prisma.refund.count({ where: { approvedById: userId, ...when } }),
       prisma.inventoryMovement.count({ where: { userId, ...when } }),

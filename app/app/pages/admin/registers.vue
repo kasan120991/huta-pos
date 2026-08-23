@@ -195,8 +195,26 @@ async function saveRename(row: TerminalAdminRow) {
 }
 
 /* ————— activate / deactivate ————— */
+/**
+ * ⚠️ The dialog's OPEN state is a separate ref from the row it is about, and that separation
+ * is load-bearing.
+ *
+ * reka's `AlertDialogAction` closes the dialog on click, and that close fires `@update:open`
+ * BEFORE the fallthrough `@click` runs. When one ref did both jobs, the close nulled it and
+ * `deactivateTarget && setActive(deactivateTarget, false)` short-circuited to nothing — no
+ * request, no error, dialog shut. Deactivating a register silently did nothing.
+ *
+ * Keeping the row after the close is harmless: it is only read by the action and by the
+ * title, and the title is only on screen while `deactivateOpen` is true.
+ */
 const deactivateTarget = ref<TerminalAdminRow | null>(null)
+const deactivateOpen = ref(false)
 const toggling = ref(false)
+
+function askDeactivate(row: TerminalAdminRow) {
+  deactivateTarget.value = row
+  deactivateOpen.value = true
+}
 
 async function setActive(row: TerminalAdminRow, active: boolean) {
   if (toggling.value) return
@@ -205,7 +223,7 @@ async function setActive(row: TerminalAdminRow, active: boolean) {
   try {
     await apiFetch(`/auth/terminals/${row.id}`, { method: 'PATCH', body: { active } })
     await fetchTerminals()
-    deactivateTarget.value = null
+    deactivateOpen.value = false
   } catch (err) {
     actionError.value = err instanceof ApiError ? err.message : 'Something went wrong.'
   } finally {
@@ -268,7 +286,7 @@ async function setActive(row: TerminalAdminRow, active: boolean) {
               <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-muted-foreground" @click="startRename(row)">
                 <Pencil class="size-3" /> Rename
               </Button>
-              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-muted-foreground" @click="deactivateTarget = row">
+              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-muted-foreground" @click="askDeactivate(row)">
                 Deactivate
               </Button>
             </template>
@@ -366,7 +384,7 @@ async function setActive(row: TerminalAdminRow, active: boolean) {
       click, so a failure surfaces on the page behind rather than behind a stuck dialog —
       which is what used to happen.
     -->
-    <AlertDialog :open="deactivateTarget !== null" @update:open="(o: boolean) => !o && (deactivateTarget = null)">
+    <AlertDialog v-model:open="deactivateOpen">
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Deactivate {{ deactivateTarget?.name }}?</AlertDialogTitle>
