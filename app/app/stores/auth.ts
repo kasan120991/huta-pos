@@ -126,8 +126,16 @@ export const useAuthStore = defineStore('auth', {
     },
 
     /** Who may sign in here. Store scope comes from the device cookie, not from us. */
-    async fetchRoster(): Promise<RosterEntry[]> {
-      const data = await apiFetch<{ staff: RosterEntry[] }>('/auth/staff/roster')
+    /**
+     * Who may sign in here. Defaults to THIS STORE — anyone may work anywhere since
+     * 2026-08-22, but an unattended register should not list every employee of the business
+     * until someone deliberately asks. `'all'` is what the sign-in screen's visiting link
+     * requests.
+     */
+    async fetchRoster(scope: 'store' | 'all' = 'store'): Promise<RosterEntry[]> {
+      const data = await apiFetch<{ staff: RosterEntry[] }>('/auth/staff/roster', {
+        ...(scope === 'all' ? { query: { scope: 'all' } } : {}),
+      })
       return data.staff
     },
 

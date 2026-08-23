@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import type { AdminPrincipal } from '../../src/auth/principal.js'
-import { attachByPin } from '../../src/auth/auth.service.js'
+import { attachByPin, principalFromUser, roster } from '../../src/auth/auth.service.js'
 import {
   changeOwnPin,
   clearLockout,
@@ -232,7 +232,12 @@ describe('staff administration', () => {
     await expect(attachByPin(user.id, '4242', terminal.id, storeId)).resolves.toBeTruthy()
   })
 
-  it('de-authenticates a reassigned cashier at their old store', async () => {
+  /**
+   * REPLACES "de-authenticates a reassigned cashier at their old store", which asserted the
+   * rule Kasan reversed on 2026-08-22. Moving someone's home store no longer bars them from
+   * anywhere; it only changes where they are recorded as based.
+   */
+  it('keeps a reassigned cashier working at both stores', async () => {
     const other = await makeStore('Ashley', 'ashley')
     const { user } = await createStaff({ firstName: 'Testy', lastName: 'McTemp', storeId }, adminId)
     await changeOwnPin(user.id, '4242')
@@ -240,13 +245,122 @@ describe('staff administration', () => {
 
     await updateUser(user.id, { storeId: other.id }, adminId)
 
-    // Staff may only attach at their own store, so the old till stops recognising them.
-    await expect(attachByPin(user.id, '4242', oldTerminal.id, storeId)).rejects.toThrow(
-      UnauthorizedError,
-    )
+    const still = await attachByPin(user.id, '4242', oldTerminal.id, storeId)
+    // ...and they are scoped to the till they are standing at, not to their new home store.
+    expect(still.principal.storeId).toBe(storeId)
   })
 
   it('404s on an unknown person rather than leaking existence', async () => {
     await expect(getUser('cmt0000000000000000000000')).rejects.toThrow(NotFoundError)
+  })
+})
+
+/**
+ * Anyone works anywhere (Kasan, 2026-08-22). The terminal establishes WHICH STORE and the PIN
+ * establishes WHO — which is what the three-layer auth model always claimed; a home-store
+ * guard on attach was the one thing contradicting it.
+ *
+ * `User.storeId` survives as a HOME store: it records who is based where and orders the
+ * sign-in roster, and governs nothing.
+ */
+describe('staff work at any store', () => {
+  let home: string
+  let away: string
+  let adminId: string
+
+  beforeEach(async () => {
+    await resetDatabase()
+    home = (await makeStore('Main', 'main')).id
+    away = (await makeStore('Ashley', 'ashley')).id
+    adminId = (await makeAdmin()).id
+  })
+
+  async function cashier(firstName: string, storeId: string, pin: string) {
+    const { user } = await createStaff({ firstName, lastName: 'Tester', storeId }, adminId)
+    await changeOwnPin(user.id, pin)
+    return user
+  }
+
+  it('attaches a cashier at another store and scopes them to THAT store', async () => {
+    const user = await cashier('Visitor', home, '4242')
+    const awayTerminal = await makeTerminal(away, 'device-token-away-1')
+
+    const attached = await attachByPin(user.id, '4242', awayTerminal.id, away)
+
+    expect(attached.principal.storeId).toBe(away)
+    expect(attached.principal.storeId).not.toBe(home)
+  })
+
+  /**
+   * ⚠️ THE TRAP, and the reason this is more than deleting one guard.
+   *
+   * `attachByPin` and `principalFromUser` are two independent derivations of the same fact and
+   * they used to disagree — attach read the terminal, this read the home store. They could not
+   * be caught disagreeing because the removed guard forced them equal. Without fixing both, a
+   * visiting cashier would be handed a session for the store they are standing in and then, on
+   * their very NEXT request, be refused or silently moved home.
+   */
+  it('keeps the visiting cashier at that store on the next request, not their home one', async () => {
+    const user = await cashier('Visitor', home, '4242')
+    const awayTerminal = await makeTerminal(away, 'device-token-away-2')
+    await attachByPin(user.id, '4242', awayTerminal.id, away)
+
+    // What `authenticate` does on every subsequent request.
+    const rebuilt = await principalFromUser(user.id, awayTerminal.id, away)
+
+    expect(rebuilt).not.toBeNull()
+    expect(rebuilt?.storeId).toBe(away)
+  })
+
+  /**
+   * A staff session cannot exist away from a terminal — staff hold no password — so with no
+   * device we cannot know which store they are at. Refusing is what sends a register to
+   * /register/pair, the documented remedy for a device that has lost its token.
+   */
+  it('refuses a staff session with no terminal behind it', async () => {
+    const user = await cashier('Deskless', home, '4242')
+    expect(await principalFromUser(user.id, null, null)).toBeNull()
+    expect(await principalFromUser(user.id, 'cmt0000000000000000000000', null)).toBeNull()
+  })
+
+  it('still refuses a wrong PIN, so the open door is the STORE and nothing else', async () => {
+    const user = await cashier('Visitor', home, '4242')
+    const awayTerminal = await makeTerminal(away, 'device-token-away-3')
+
+    await expect(attachByPin(user.id, '9999', awayTerminal.id, away)).rejects.toThrow(
+      UnauthorizedError,
+    )
+  })
+
+  /**
+   * The roster stays LOCAL by default. An unattended register is readable by anyone standing
+   * in the shop, and listing every employee of the business on it is a wider disclosure than
+   * the one this change replaced — so a visitor is reached deliberately, via `scope: 'all'`.
+   */
+  it('lists only this store by default, and everyone on request', async () => {
+    const local = await cashier('Local', away, '1111')
+    const visitor = await cashier('Visitor', home, '2222')
+
+    // An admin needs a PIN to be on any roster — holding one is optional (see Auth), and
+    // `makeAdmin` creates a password-only admin, which correctly does not appear.
+    await changeOwnPin(adminId, '9000')
+
+    const byDefault = await roster(away)
+    const ids = byDefault.map((r) => r.userId)
+    expect(ids).toContain(local.id)
+    expect(ids).toContain(adminId) // admins could always attach anywhere
+    expect(ids).not.toContain(visitor.id)
+
+    const everyone = await roster(away, 'all')
+    expect(everyone.map((r) => r.userId)).toContain(visitor.id)
+  })
+
+  it('never puts more than a first name and last initial on the roster', async () => {
+    await cashier('Local', away, '1111')
+    const entries = await roster(away, 'all')
+    for (const e of entries) {
+      expect(Object.keys(e).sort()).toEqual(['firstName', 'lastInitial', 'userId'])
+      expect(e.lastInitial).toHaveLength(1)
+    }
   })
 })

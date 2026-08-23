@@ -55,18 +55,26 @@ export interface RosterEntry {
 }
 
 /**
- * Who can attach at this terminal: the store's active staff, plus every admin.
+ * Who can attach at this terminal.
  *
- * Deliberately minimal — first name and last initial only. This endpoint is reachable by
- * an unattended register, so it must not expose emails, lock state, or anything else
- * about the people who work here.
+ * Anyone may work at any store since 2026-08-22, so the honest answer is "every active
+ * person" — but this endpoint is reachable by an UNATTENDED register, and printing every
+ * employee's name on a screen in every shop is a wider disclosure than the one it replaced.
+ * So it stays LOCAL by default (this store's staff, plus admins, who could always attach
+ * anywhere) and `scope: 'all'` is what the sign-in screen's "Someone else" asks for.
+ *
+ * Deliberately minimal either way — first name and last initial only. No emails, no lock
+ * state, nothing else about the people who work here.
  */
-export async function roster(storeId: string): Promise<RosterEntry[]> {
+export async function roster(
+  storeId: string,
+  scope: 'store' | 'all' = 'store',
+): Promise<RosterEntry[]> {
   const users = await prisma.user.findMany({
     where: {
       active: true,
       pinHash: { not: null },
-      OR: [{ storeId }, { role: Role.ADMIN }],
+      ...(scope === 'all' ? {} : { OR: [{ storeId }, { role: Role.ADMIN }] }),
     },
     select: { id: true, firstName: true, lastName: true },
     orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
@@ -109,11 +117,14 @@ export async function attachByPin(
     throw new UnauthorizedError('That PIN was not recognised.')
   }
 
-  // A staff member may only attach at their own store; an admin may attach anywhere.
-  // Checked before the PIN so a wrong-store attempt cannot be used as a PIN oracle.
-  if (user.role === Role.STAFF && user.storeId !== terminalStoreId) {
-    throw new UnauthorizedError('That PIN was not recognised.')
-  }
+  // Anyone may attach ANYWHERE (Kasan, 2026-08-22). People cover both shops, so the terminal
+  // establishes WHICH STORE and the PIN establishes WHO — which is what the three-layer model
+  // always said; a home-store guard here was the one thing contradicting it.
+  //
+  // `User.storeId` survives as a home store: it records who is based where and orders the
+  // roster, and it no longer governs anything. Nothing is lost by dropping the check, because
+  // PINs are globally unique already (see Auth) — a cashier from another store could never
+  // have collided with a local one.
 
   // Burn an attempt BEFORE verifying. Doing it after would let five simultaneous wrong
   // PINs all read the same counter and all write the same value, consuming five attempts
@@ -276,15 +287,26 @@ export async function principalFromUser(
   if (user.role === Role.ADMIN) {
     return { kind: 'admin', userId: user.id, role: Role.ADMIN, storeId: null, terminalId }
   }
-  if (!user.storeId || !terminalId) return null
-  // Defence in depth: the token says which store, but the database is authoritative.
-  if (terminalStoreId !== null && terminalStoreId !== user.storeId) return null
+  /**
+   * ⚠️ The store comes from the TERMINAL, never from `user.storeId`.
+   *
+   * This function and `attachByPin` are two independent derivations of the same fact, and
+   * until 2026-08-22 they disagreed: attach used the terminal, this used the home store. They
+   * could not be caught disagreeing only because the attach guard forced them equal. Removing
+   * that guard without fixing this would mint a session for the store someone is standing in
+   * and then, on the very next request, either refuse it or silently move them home.
+   *
+   * A staff session cannot exist away from a terminal — staff hold no password — so no
+   * terminal means we cannot know where they are, and refusing sends a register to
+   * `/register/pair`, which is the documented remedy for a device that has lost its token.
+   */
+  if (!terminalId || terminalStoreId === null) return null
 
   return {
     kind: 'staff',
     userId: user.id,
     role: Role.STAFF,
-    storeId: user.storeId,
+    storeId: terminalStoreId,
     terminalId,
   }
 }

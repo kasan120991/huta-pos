@@ -50,9 +50,46 @@ onMounted(async () => {
   await loadRoster()
 })
 
+/**
+ * Anyone may work at any store since 2026-08-22, but this screen is readable by whoever is
+ * standing at the till, with no login — so it shows THIS STORE's team by default and fetches
+ * the rest only when someone asks.
+ *
+ * The extra people are APPENDED under a divider rather than replacing the grid: the local team
+ * keeps its position, so nobody loses the tile they were already reaching for.
+ */
+const visiting = ref<RosterEntry[]>([])
+const loadingVisiting = ref(false)
+/**
+ * Whether the visiting list has been ASKED for — deliberately not `visiting.length > 0`.
+ * Deriving it from the array makes "nobody else exists" indistinguishable from "not asked
+ * yet", so tapping the link when everyone is already local would appear to do nothing.
+ */
+const visitingShown = ref(false)
+
+async function showVisiting() {
+  if (loadingVisiting.value || visitingShown.value) return
+  loadingVisiting.value = true
+  rosterError.value = null
+  try {
+    const everyone = await auth.fetchRoster('all')
+    // Whoever is not already on the local grid. Subtracting by id needs no extra field on
+    // the payload, and the payload deliberately carries nothing but a name.
+    const here = new Set(staff.value.map((p) => p.userId))
+    visiting.value = everyone.filter((p) => !here.has(p.userId))
+    visitingShown.value = true
+  } catch (error) {
+    rosterError.value = error instanceof ApiError ? error.message : 'Could not reach the server.'
+  } finally {
+    loadingVisiting.value = false
+  }
+}
+
 async function loadRoster() {
   loadingRoster.value = true
   rosterError.value = null
+  visiting.value = []
+  visitingShown.value = false
   try {
     staff.value = await auth.fetchRoster()
   } catch (error) {
@@ -227,11 +264,12 @@ const displayName = (p: RosterEntry) => `${p.firstName} ${p.lastInitial}.`
         <button type="button" class="ml-2 underline underline-offset-2" @click="loadRoster">Retry</button>
       </FieldError>
       <p v-else-if="loadingRoster" class="mt-8 text-sm text-muted-foreground">Loading roster…</p>
-      <p v-else-if="!staff.length" class="mt-8 max-w-sm text-center text-sm text-muted-foreground">
-        Nobody can sign in at this store yet — add staff in the back office.
+      <p v-else-if="!staff.length && !visitingShown" class="mt-8 max-w-sm text-center text-sm text-muted-foreground">
+        Nobody is based at this store yet. Someone from the other store can still sign in below,
+        or add staff in the back office.
       </p>
 
-      <div v-else class="mt-8 grid grid-cols-3 gap-4 sm:grid-cols-4 lg:grid-cols-5">
+      <div v-if="staff.length" class="mt-8 grid grid-cols-3 gap-4 sm:grid-cols-4 lg:grid-cols-5">
         <button
           v-for="person in staff"
           :key="person.userId"
@@ -245,6 +283,50 @@ const displayName = (p: RosterEntry) => `${p.firstName} ${p.lastInitial}.`
           <span class="text-sm font-semibold">{{ displayName(person) }}</span>
         </button>
       </div>
+
+      <!--
+        The exception, rendered as one: a line of text rather than a tile, so every tile above
+        stays a person. Generous padding because a text link is a poor touch target and this is
+        a touchscreen — `py-3 px-4` gives it a 44px-tall hit area.
+      -->
+      <button
+        v-if="!loadingRoster && !rosterError && !visitingShown"
+        type="button"
+        class="mt-5 rounded-lg px-4 py-3 text-sm text-muted-foreground underline decoration-muted-foreground/40 underline-offset-4 transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+        @click="showVisiting"
+      >
+        {{ loadingVisiting ? 'Looking…' : 'Working here from another store?' }}
+      </button>
+
+      <template v-if="visitingShown">
+        <div class="mt-7 flex w-full max-w-2xl items-center gap-3">
+          <span class="h-px flex-1 bg-border" />
+          <span class="text-[10px] font-bold uppercase tracking-[0.1em] text-muted-foreground">
+            Visiting today
+          </span>
+          <span class="h-px flex-1 bg-border" />
+        </div>
+
+        <div class="mt-4 grid grid-cols-3 gap-4 sm:grid-cols-4 lg:grid-cols-5">
+          <button
+            v-for="person in visiting"
+            :key="person.userId"
+            type="button"
+            class="flex h-28 w-36 flex-col items-center justify-center gap-2.5 rounded-2xl border bg-card transition-colors hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring/50"
+            @click="choose(person)"
+          >
+            <!-- Muted, not green: these are the people who do NOT normally stand here. -->
+            <span class="flex size-10 items-center justify-center rounded-full bg-muted text-sm font-bold text-muted-foreground">
+              {{ initials(person) }}
+            </span>
+            <span class="text-sm font-semibold">{{ displayName(person) }}</span>
+          </button>
+        </div>
+
+        <p v-if="!visiting.length" class="mt-4 text-sm text-muted-foreground">
+          Everyone who can sign in is already listed above.
+        </p>
+      </template>
     </div>
 
     <!-- PIN overlay -->

@@ -17,7 +17,7 @@ import {
 import { DEVICE_SESSION_TTL_SECONDS, signAccessToken } from '../lib/tokens.js'
 import { requireAdmin, requirePrincipal } from '../middleware/authenticate.js'
 import { issueCsrfToken } from '../middleware/csrf.js'
-import { validateBody, validateParams } from '../middleware/validate.js'
+import { validateBody, validateParams, validateQuery, validatedQuery } from '../middleware/validate.js'
 import {
   attachByPin,
   authenticateAdmin,
@@ -310,16 +310,24 @@ authRouter.get(
 
 // --- staff attach / detach -------------------------------------------------------------
 
+const rosterQuery = z.object({ scope: z.enum(['store', 'all']).optional() })
+
 /**
- * Who may attach at this register. Store scope comes from the DEVICE, never from the
- * client — an unattended terminal must not be able to enumerate another store's staff.
+ * Who may attach at this register.
+ *
+ * Store scope still comes from the DEVICE, never from the client — that part is unchanged and
+ * is why `storeId` is not a parameter. What IS a parameter is `scope`: since 2026-08-22 anyone
+ * may work at any store, so a visiting cashier needs a way to reach their own tile. The
+ * default stays LOCAL, because an unattended screen in a shop should not list every employee
+ * of the business; `scope=all` is what the sign-in screen's "Someone else" asks for.
  */
-authRouter.get('/staff/roster', async (req, res) => {
+authRouter.get('/staff/roster', validateQuery(rosterQuery), async (req, res) => {
   const principal = requirePrincipal(req)
   if (principal.storeId === null) {
     throw new UnauthorizedError('This register is not paired to a store.')
   }
-  res.json({ staff: await roster(principal.storeId) })
+  const { scope } = validatedQuery<z.infer<typeof rosterQuery>>(req)
+  res.json({ staff: await roster(principal.storeId, scope ?? 'store') })
 })
 
 const pinSchema = z.object({
