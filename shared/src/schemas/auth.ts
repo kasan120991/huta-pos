@@ -128,6 +128,14 @@ export interface TimeEntryRow {
   readonly minutes: number | null
   readonly note: string | null
   readonly closedByName: string | null
+  /**
+   * The committed pay run this entry falls inside, if any — a fortnight that has been paid is
+   * closed to timesheet edits, and the screen should say so before somebody types rather than
+   * after. Null means editable.
+   */
+  readonly paidRunId?: string | null
+  /** `YYYY-MM-DD` of that run's period, so the dialog can name it. */
+  readonly paidPeriodStartDate?: string | null
 }
 
 /**

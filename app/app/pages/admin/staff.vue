@@ -75,7 +75,7 @@ import { formatMinutesAsHours } from '@huta/shared'
 import { dollars, parseDollars } from '~/lib/money'
 import { ApiError, apiFetch } from '~/composables/useApi'
 import { money, varianceView } from '~/lib/sale-format'
-import { Clock, UserX } from '@lucide/vue'
+import { Clock, Lock, UserX } from '@lucide/vue'
 
 /**
  * Staff (Kasan's option A, 2026-08-22) — index, then a full workspace.
@@ -637,28 +637,76 @@ const clockTime = (iso: string) =>
 
 /* ————— correcting an entry ————— */
 const fixing = ref<TimeEntryRow | null>(null)
+const fixStart = ref('')
 const fixEnd = ref('')
+/**
+ * Whether the START is being edited (Kasan's pick B).
+ *
+ * The end time is what is nearly always wrong — people remember to clock in and forget to
+ * clock out — so the start opens as a fact with a Change link beside it. Still visible, so it
+ * can be checked without being touched.
+ */
+const fixStartOpen = ref(false)
 const fixNote = ref('')
 const fixError = ref<string | null>(null)
 
+const pad2 = (n: number) => String(n).padStart(2, '0')
+/** A Date → the `datetime-local` shape, in the browser's zone, which is what the input reads. */
+function toLocalInput(at: Date): string {
+  return `${at.getFullYear()}-${pad2(at.getMonth() + 1)}-${pad2(at.getDate())}T${pad2(at.getHours())}:${pad2(at.getMinutes())}`
+}
+
 function startFix(entry: TimeEntryRow) {
   fixing.value = entry
+  fixStart.value = toLocalInput(new Date(entry.clockedInAt))
   // Seed with whatever the system guessed, so the admin edits rather than retypes.
-  const seed = entry.clockedOutAt ? new Date(entry.clockedOutAt) : new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  fixEnd.value = `${seed.getFullYear()}-${pad(seed.getMonth() + 1)}-${pad(seed.getDate())}T${pad(seed.getHours())}:${pad(seed.getMinutes())}`
+  fixEnd.value = toLocalInput(entry.clockedOutAt ? new Date(entry.clockedOutAt) : new Date())
+  fixStartOpen.value = false
   fixNote.value = ''
   fixError.value = null
 }
 
+/** Null while an entry is still running — there is nothing to measure yet. */
+const fixMinutes = computed(() => {
+  if (!fixing.value) return null
+  const start = fixStart.value ? new Date(fixStart.value) : null
+  const end = fixEnd.value ? new Date(fixEnd.value) : null
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null
+  const minutes = Math.round((end.getTime() - start.getTime()) / 60_000)
+  return minutes > 0 ? minutes : null
+})
+
+/** What the entry says NOW, so the strip can show what is being replaced. */
+const fixWasMinutes = computed(() => fixing.value?.minutes ?? null)
+
+const fixStartMoved = computed(
+  () =>
+    fixing.value !== null &&
+    fixStart.value !== '' &&
+    new Date(fixStart.value).getTime() !== new Date(fixing.value.clockedInAt).getTime(),
+)
+
+/** A fortnight that has been paid is closed to edits — say so before anybody types. */
+const fixLocked = computed(() => fixing.value?.paidRunId ?? null)
+
+const fixValid = computed(
+  () => fixLocked.value === null && fixNote.value.trim() !== '' && fixEnd.value !== '' && fixMinutes.value !== null,
+)
+
 async function saveFix() {
   const entry = fixing.value
-  if (!entry || !fixNote.value.trim() || !fixEnd.value) return
+  if (!entry || !fixValid.value) return
   fixError.value = null
   try {
     await apiFetch(`/timeclock/entries/${entry.id}`, {
       method: 'PATCH',
-      body: { clockedOutAt: new Date(fixEnd.value).toISOString(), note: fixNote.value.trim() },
+      body: {
+        // Only send the start when it actually moved — an untouched field should not appear
+        // in the audit row as a change.
+        ...(fixStartMoved.value ? { clockedInAt: new Date(fixStart.value).toISOString() } : {}),
+        clockedOutAt: new Date(fixEnd.value).toISOString(),
+        note: fixNote.value.trim(),
+      },
     })
     fixing.value = null
     if (selectedId.value) await loadHours(selectedId.value)
@@ -1381,7 +1429,7 @@ watch([tab, range], () => {
     <Dialog :open="fixing !== null" @update:open="(o: boolean) => !o && (fixing = null)">
       <DialogContent class="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Set the real end time</DialogTitle>
+          <DialogTitle>Correct this entry</DialogTitle>
           <DialogDescription>
             <template v-if="fixing?.status === 'AUTO'">
               Nobody clocked out, so this was closed at the 12-hour cutoff. The hours are a
@@ -1391,11 +1439,71 @@ watch([tab, range], () => {
           </DialogDescription>
         </DialogHeader>
 
-        <FieldGroup class="gap-4">
+        <!--
+          A paid fortnight is closed to edits: payroll pays from this table, so changing an
+          entry inside a committed run would leave the run no longer matching the hours it was
+          worked out from. The one refusal with a specific remedy, so it names it.
+        -->
+        <div
+          v-if="fixLocked"
+          class="flex items-start gap-2.5 rounded-lg border border-red-400/40 bg-red-400/10 px-3 py-2.5 text-sm"
+        >
+          <Lock class="mt-0.5 size-4 shrink-0 text-red-400" />
+          <span>
+            <b class="text-red-400">This fortnight has been paid.</b>
+            Reverse the pay run for the fortnight from
+            {{ fixing?.paidPeriodStartDate ? payDay(fixing.paidPeriodStartDate) : '' }} before changing the
+            timesheet, or the run stops matching the hours it was worked out from.
+          </span>
+        </div>
+
+        <FieldGroup v-else class="gap-4">
+          <Field>
+            <FieldLabel :for="fixStartOpen ? 'fix-start' : undefined">Clocked in at</FieldLabel>
+            <!-- Shown as a fact until asked otherwise: the end time is what is nearly always
+                 wrong, and presenting both equally invites editing the one that was right. -->
+            <div v-if="!fixStartOpen" class="flex items-baseline gap-3">
+              <span class="text-sm tabular-nums">
+                {{ fixing ? new Date(fixing.clockedInAt).toLocaleString(undefined, {
+                  weekday: 'short', day: 'numeric', month: 'short',
+                  hour: 'numeric', minute: '2-digit',
+                }) : '' }}
+              </span>
+              <button
+                type="button"
+                class="text-xs text-primary underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                @click="fixStartOpen = true"
+              >
+                Change
+              </button>
+            </div>
+            <Input v-else id="fix-start" v-model="fixStart" type="datetime-local" />
+          </Field>
+
           <Field>
             <FieldLabel for="fix-end">Clocked out at</FieldLabel>
             <Input id="fix-end" v-model="fixEnd" type="datetime-local" />
           </Field>
+
+          <!--
+            What the entry will be WORTH. On an estimated entry the figure being replaced is a
+            twelve-hour guess, and with the start editable a mis-keyed date is silent — 08/11
+            and 08/12 look alike and the difference is a day's pay.
+          -->
+          <div
+            v-if="fixMinutes !== null"
+            class="flex items-baseline gap-3 rounded-lg border border-primary/30 bg-primary/[0.08] px-3 py-2"
+          >
+            <span class="text-[10px] font-bold uppercase tracking-[0.11em] text-muted-foreground">
+              Hours recorded
+            </span>
+            <span
+              v-if="fixWasMinutes !== null && fixWasMinutes !== fixMinutes"
+              class="text-xs text-muted-foreground line-through tabular-nums"
+            >{{ hm(fixWasMinutes) }}</span>
+            <span class="ml-auto text-base font-bold tabular-nums text-primary">{{ hm(fixMinutes) }}</span>
+          </div>
+
           <Field>
             <!-- The database refuses a correction without one: a changed timesheet with no
                  reason is not an audit trail, and this is what someone gets paid from. -->
@@ -1406,8 +1514,11 @@ watch([tab, range], () => {
         </FieldGroup>
 
         <DialogFooter>
-          <Button variant="ghost" @click="fixing = null">Cancel</Button>
-          <Button :disabled="!fixNote.trim() || !fixEnd" @click="saveFix">Save</Button>
+          <Button variant="ghost" @click="fixing = null">{{ fixLocked ? 'Close' : 'Cancel' }}</Button>
+          <Button v-if="fixLocked" variant="outline" as-child>
+            <NuxtLink :to="`/admin/payroll/${fixLocked}`">Open the pay run →</NuxtLink>
+          </Button>
+          <Button v-else :disabled="!fixValid" @click="saveFix">Save</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

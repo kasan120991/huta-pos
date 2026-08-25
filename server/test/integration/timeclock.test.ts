@@ -322,6 +322,121 @@ describe('timeclock', () => {
     // An admin has no clock, so there is nothing to report.
     expect(await currentEntry(admin)).toBeNull()
   })
+  describe('correcting the START time', () => {
+    /** A finished entry, written directly so the times are ours to choose. */
+    async function finished(startIso: string, minutes: number) {
+      const start = new Date(startIso)
+      return prisma.timeEntry.create({
+        data: {
+          userId: staffId,
+          storeId,
+          clockedInAt: start,
+          clockedOutAt: new Date(start.getTime() + minutes * 60_000),
+          status: 'CLOCKED',
+        },
+        select: { id: true },
+      })
+    }
+
+    it('moves the start and re-derives the minutes', async () => {
+      const entry = await finished('2026-08-10T13:00:00.000Z', 8 * 60)
+      const fixed = await correctEntry(
+        admin,
+        entry.id,
+        { clockedInAt: '2026-08-10T12:00:00.000Z', note: 'Clocked in an hour late.' },
+        adminId,
+      )
+      expect(fixed.status).toBe('CORRECTED')
+      expect(fixed.minutes).toBe(9 * 60)
+    })
+
+    it('moves both ends at once', async () => {
+      const entry = await finished('2026-08-10T13:00:00.000Z', 8 * 60)
+      const fixed = await correctEntry(
+        admin,
+        entry.id,
+        {
+          clockedInAt: '2026-08-10T14:00:00.000Z',
+          clockedOutAt: '2026-08-10T19:30:00.000Z',
+          note: 'Shift was 10 to 3:30.',
+        },
+        adminId,
+      )
+      expect(fixed.minutes).toBe(5 * 60 + 30)
+    })
+
+    /**
+     * Fixing a start must NOT close somebody's shift for them —
+     * `TimeEntry_status_pairing_check` requires an OPEN row to carry no end time.
+     */
+    it('leaves an entry that is still running OPEN', async () => {
+      const open = await clockIn(staff)
+      const fixed = await correctEntry(
+        admin,
+        open.id,
+        { clockedInAt: new Date(Date.now() - 3600_000).toISOString(), note: 'Started at ten.' },
+        adminId,
+      )
+      expect(fixed.status).toBe('OPEN')
+      expect(fixed.clockedOutAt).toBeNull()
+      expect(fixed.minutes).toBeNull()
+    })
+
+    it('refuses a start after the end', async () => {
+      const entry = await finished('2026-08-10T13:00:00.000Z', 60)
+      await expect(
+        correctEntry(admin, entry.id, { clockedInAt: '2026-08-10T18:00:00.000Z', note: 'x' }, adminId),
+      ).rejects.toBeInstanceOf(ValidationError)
+    })
+
+    it('refuses a start in the future', async () => {
+      const entry = await finished('2026-08-10T13:00:00.000Z', 60)
+      await expect(
+        correctEntry(
+          admin,
+          entry.id,
+          { clockedInAt: new Date(Date.now() + 86_400_000).toISOString(), note: 'x' },
+          adminId,
+        ),
+      ).rejects.toBeInstanceOf(ValidationError)
+    })
+
+    /** A mis-keyed date is the likeliest mistake, and it would land 30 hours at time and a half. */
+    it('refuses an entry longer than a day', async () => {
+      const entry = await finished('2026-08-10T13:00:00.000Z', 60)
+      await expect(
+        correctEntry(
+          admin,
+          entry.id,
+          { clockedInAt: '2026-08-08T13:00:00.000Z', note: 'wrong month' },
+          adminId,
+        ),
+      ).rejects.toBeInstanceOf(ValidationError)
+    })
+
+    it('refuses when nothing was supplied', async () => {
+      const entry = await finished('2026-08-10T13:00:00.000Z', 60)
+      await expect(
+        correctEntry(admin, entry.id, { note: 'nothing to do' }, adminId),
+      ).rejects.toBeInstanceOf(ValidationError)
+    })
+
+    it('records BOTH original timestamps in the audit, since either may have moved', async () => {
+      const entry = await finished('2026-08-10T13:00:00.000Z', 8 * 60)
+      await correctEntry(
+        admin,
+        entry.id,
+        { clockedInAt: '2026-08-10T12:00:00.000Z', note: 'Earlier start.' },
+        adminId,
+      )
+      const log = await prisma.auditLog.findFirst({
+        where: { entityId: entry.id, action: 'timeclock.correct' },
+      })
+      const before = log?.before as { clockedInAt?: string, clockedOutAt?: string }
+      expect(before.clockedInAt).toBe('2026-08-10T13:00:00.000Z')
+      expect(before.clockedOutAt).toBe('2026-08-10T21:00:00.000Z')
+    })
+  })
 })
 
 /**
@@ -408,4 +523,5 @@ describe('timeclock business days', () => {
     expect(page.entries).toHaveLength(1)
     expect(page.totalMinutes).toBe(90)
   })
+
 })

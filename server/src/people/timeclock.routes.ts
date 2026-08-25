@@ -51,11 +51,17 @@ timeclockRouter.get('/entries', requireAdmin, async (req, res) => {
 
 const idParam = z.object({ id: z.cuid() })
 
-const correctionSchema = z.object({
-  clockedOutAt: z.string().min(1),
-  /** Required — a changed timesheet without a reason is not an audit trail. */
-  note: z.string().trim().min(1).max(300),
-})
+const correctionSchema = z
+  .object({
+    /** Either may be supplied; the service validates the pair and the resulting interval. */
+    clockedInAt: z.string().min(1).optional(),
+    clockedOutAt: z.string().min(1).optional(),
+    /** Required — a changed timesheet without a reason is not an audit trail. */
+    note: z.string().trim().min(1).max(300),
+  })
+  .refine((v) => v.clockedInAt !== undefined || v.clockedOutAt !== undefined, {
+    message: 'Supply a start time, an end time, or both.',
+  })
 
 timeclockRouter.patch(
   '/entries/:id',

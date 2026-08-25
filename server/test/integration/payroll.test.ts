@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { AdminPrincipal, StaffPrincipal } from '../../src/auth/principal.js'
 import { prisma } from '../../src/db/client.js'
 import { ConflictError, ValidationError } from '../../src/errors/index.js'
-import { listEntries } from '../../src/people/timeclock.service.js'
+import { correctEntry, listEntries } from '../../src/people/timeclock.service.js'
 import {
   PAY_PERIOD_ANCHOR_SUNDAY,
   commitRun,
@@ -315,6 +315,66 @@ describe('payroll', () => {
       )
 
       await expect(reverseRun(admin, run.id, 'nope', adminId)).rejects.toBeInstanceOf(ConflictError)
+    })
+  })
+
+  describe('a paid fortnight is closed to timesheet edits', () => {
+    /**
+     * ⚠️ Added with editable start times, and it applies to the end time too — that was a gap
+     * the moment payroll started paying from this table. Editing an entry inside a committed
+     * run would leave the run no longer matching the timesheet it was computed from.
+     */
+    it('refuses to edit an entry inside a committed run', async () => {
+      await wage(2000)
+      const entry = await workedOn('2026-08-10T13:00:00.000Z', 8 * 60)
+      await commitRun(admin, PERIOD, undefined, adminId)
+
+      await expect(
+        correctEntry(
+          admin,
+          entry.id,
+          { clockedOutAt: '2026-08-10T22:00:00.000Z', note: 'Stayed an extra hour.' },
+          adminId,
+        ),
+      ).rejects.toBeInstanceOf(ConflictError)
+    })
+
+    /** An entry dated by its START must not be MOVED into a paid fortnight either. */
+    it('refuses to move an entry INTO a committed run', async () => {
+      await wage(2000)
+      await workedOn('2026-08-10T13:00:00.000Z', 8 * 60)
+      await commitRun(admin, PERIOD, undefined, adminId)
+
+      // A later, unpaid entry. Both ends move together — shifting only the start would make
+      // a twelve-day entry and trip the length guard instead, which is a different refusal.
+      const later = await workedOn('2026-08-24T13:00:00.000Z', 8 * 60)
+      await expect(
+        correctEntry(
+          admin,
+          later.id,
+          {
+            clockedInAt: '2026-08-12T13:00:00.000Z',
+            clockedOutAt: '2026-08-12T21:00:00.000Z',
+            note: 'Wrong week.',
+          },
+          adminId,
+        ),
+      ).rejects.toBeInstanceOf(ConflictError)
+    })
+
+    it('allows the edit again once the run is reversed', async () => {
+      await wage(2000)
+      const entry = await workedOn('2026-08-10T13:00:00.000Z', 8 * 60)
+      const run = await commitRun(admin, PERIOD, undefined, adminId)
+      await reverseRun(admin, run.id, 'Timesheet was wrong.', adminId)
+
+      const fixed = await correctEntry(
+        admin,
+        entry.id,
+        { clockedOutAt: '2026-08-10T22:00:00.000Z', note: 'Stayed an extra hour.' },
+        adminId,
+      )
+      expect(fixed.minutes).toBe(9 * 60)
     })
   })
 

@@ -272,9 +272,45 @@ export async function listEntries(principal: Principal, filter: EntryFilter) {
    * caller can add them together and say "38h 20m, of which 6h estimated" — which is the
    * honest version of the same figure.
    */
+  /*
+   * Which of these sit inside a fortnight that has already been paid.
+   *
+   * ONE query for the whole page, not one per row: the committed runs covering these people
+   * are a handful, and matching an entry to one is then plain arithmetic. A per-entry lookup
+   * would be up to 500 round trips for a page that renders in a table.
+   */
+  const userIds = [...new Set(rows.map((r) => r.userId))]
+  const paidRuns = userIds.length
+    ? await prisma.payRun.findMany({
+        where: { status: 'COMMITTED', lines: { some: { userId: { in: userIds } } } },
+        select: {
+          id: true,
+          periodStartDate: true,
+          periodStart: true,
+          periodEnd: true,
+          lines: { select: { userId: true } },
+        },
+      })
+    : []
+
+  const marked = rows.map((row) => {
+    const at = new Date(row.clockedInAt).getTime()
+    const run = paidRuns.find(
+      (r) =>
+        r.periodStart.getTime() <= at &&
+        r.periodEnd.getTime() > at &&
+        r.lines.some((l) => l.userId === row.userId),
+    )
+    return {
+      ...row,
+      paidRunId: run?.id ?? null,
+      paidPeriodStartDate: run?.periodStartDate ?? null,
+    }
+  })
+
   const counted = rows.filter((r) => r.minutes !== null)
   return {
-    entries: rows,
+    entries: marked,
     totalMinutes: counted
       .filter((r) => r.status !== 'AUTO')
       .reduce((sum, r) => sum + (r.minutes ?? 0), 0),
@@ -286,11 +322,46 @@ export async function listEntries(principal: Principal, filter: EntryFilter) {
 }
 
 export interface EntryCorrection {
-  readonly clockedOutAt: string
+  /** Optional — supplied only when the START is being moved too. */
+  readonly clockedInAt?: string | undefined
+  /** Optional, so an entry that is still OPEN can have its start fixed without closing it. */
+  readonly clockedOutAt?: string | undefined
   readonly note: string
 }
 
-/** Supply the real end time for an entry the system guessed at, or that is still open. */
+/** A single entry longer than this is a mis-keyed date, not a shift. */
+const MAX_ENTRY_HOURS = 24
+
+/**
+ * Refuse to move time into or out of a fortnight that has already been paid.
+ *
+ * Added 2026-08-24 with editable start times, and it applies to the end time too — that was a
+ * gap the moment payroll started paying from this table. An entry is dated by `clockedInAt`,
+ * so moving a start can move hours between pay periods; both the position it is leaving and
+ * the one it is arriving at have to be clear, or a committed run stops matching the timesheet
+ * it was computed from.
+ *
+ * Queried directly rather than through `payroll.service.ts`, which imports this module —
+ * reaching back the other way would be a cycle for one `findFirst`.
+ */
+async function assertNotPaid(userId: string, at: Date, what: string): Promise<void> {
+  const run = await prisma.payRun.findFirst({
+    where: {
+      status: 'COMMITTED',
+      periodStart: { lte: at },
+      periodEnd: { gt: at },
+      lines: { some: { userId } },
+    },
+    select: { periodStartDate: true },
+  })
+  if (run) {
+    throw new ConflictError(
+      `${what} falls in a pay run that has already been committed (${run.periodStartDate}). Reverse the run before changing the timesheet.`,
+    )
+  }
+}
+
+/** Supply the real times for an entry the system guessed at, or that is still open. */
 export async function correctEntry(
   principal: Principal,
   id: string,
@@ -301,22 +372,60 @@ export async function correctEntry(
 
   const existing = await prisma.timeEntry.findUnique({
     where: { id },
-    select: { id: true, clockedInAt: true, clockedOutAt: true, status: true },
+    select: { id: true, userId: true, clockedInAt: true, clockedOutAt: true, status: true },
   })
   if (!existing) throw new NotFoundError('That time entry does not exist.')
   if (existing.status === 'VOIDED') throw new ValidationError('That entry was discarded.')
-
-  const end = new Date(input.clockedOutAt)
-  if (Number.isNaN(end.getTime())) throw new ValidationError('That is not a valid time.')
-  // Refuse before the CHECK does, with a sentence that says what is wrong.
-  if (end <= existing.clockedInAt) {
-    throw new ValidationError('The end time has to be after the start time.')
+  if (input.clockedInAt === undefined && input.clockedOutAt === undefined) {
+    throw new ValidationError('Nothing to change.')
   }
-  if (end > new Date()) throw new ValidationError('The end time cannot be in the future.')
 
+  const now = new Date()
+
+  const start = input.clockedInAt === undefined ? existing.clockedInAt : new Date(input.clockedInAt)
+  if (Number.isNaN(start.getTime())) throw new ValidationError('That is not a valid start time.')
+  if (start > now) throw new ValidationError('The start time cannot be in the future.')
+
+  // An OPEN entry keeps its missing end: `TimeEntry_status_pairing_check` requires OPEN to
+  // carry no end time, so fixing somebody's start does not close their shift for them.
+  const end =
+    input.clockedOutAt === undefined
+      ? existing.clockedOutAt
+      : new Date(input.clockedOutAt)
+  if (end !== null && Number.isNaN(end.getTime())) {
+    throw new ValidationError('That is not a valid end time.')
+  }
+
+  if (end !== null) {
+    // Refuse before the CHECK does, with a sentence that says what is wrong.
+    if (end <= start) throw new ValidationError('The end time has to be after the start time.')
+    if (end > now) throw new ValidationError('The end time cannot be in the future.')
+    if (end.getTime() - start.getTime() > MAX_ENTRY_HOURS * 3600 * 1000) {
+      // Almost always a mis-keyed DATE rather than a real shift, and now that payroll pays
+      // from this table a 40-hour entry would land 30 of those hours at time and a half.
+      throw new ValidationError(
+        `That is more than ${MAX_ENTRY_HOURS} hours in one entry — check the dates. Split it into two entries if somebody really worked across days.`,
+      )
+    }
+  }
+
+  // Both ends of the move, because an entry is dated by where it STARTS.
+  await assertNotPaid(existing.userId, existing.clockedInAt, 'That entry')
+  if (start.getTime() !== existing.clockedInAt.getTime()) {
+    await assertNotPaid(existing.userId, start, 'The new start time')
+  }
+
+  const closing = end !== null
   const updated = await prisma.timeEntry.update({
     where: { id },
-    data: { clockedOutAt: end, status: 'CORRECTED', closedById: actorId, note: input.note },
+    data: {
+      clockedInAt: start,
+      clockedOutAt: end,
+      // Only a finished entry becomes CORRECTED; one still running stays OPEN, and nobody
+      // has closed it, so `closedById` stays as it was.
+      ...(closing ? { status: 'CORRECTED' as const, closedById: actorId } : {}),
+      note: input.note,
+    },
     select: entrySelect,
   })
 
@@ -326,11 +435,19 @@ export async function correctEntry(
       action: 'timeclock.correct',
       entityType: 'TimeEntry',
       entityId: id,
+      // Both timestamps, since either may have moved — the log is the only record of what
+      // the clock originally said.
       before: {
+        clockedInAt: existing.clockedInAt.toISOString(),
         clockedOutAt: existing.clockedOutAt?.toISOString() ?? null,
         status: existing.status,
       },
-      after: { clockedOutAt: end.toISOString(), status: 'CORRECTED', note: input.note },
+      after: {
+        clockedInAt: start.toISOString(),
+        clockedOutAt: end?.toISOString() ?? null,
+        status: closing ? 'CORRECTED' : existing.status,
+        note: input.note,
+      },
     },
   })
   return toRow(updated)
