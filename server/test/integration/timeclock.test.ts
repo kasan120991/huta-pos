@@ -55,6 +55,38 @@ describe('timeclock', () => {
     expect(row.clockedInTerminalId).toBe(terminalId)
   })
 
+  it('rounds a part-minute to the NEAREST, not down', async () => {
+    // Kasan's call, 2026-08-24: this floored until payroll started paying from it, and a
+    // floor loses up to 59 seconds per entry — always in the employer's direction.
+    const entry = await clockIn(staff)
+    await prisma.timeEntry.update({
+      where: { id: entry.id },
+      data: {
+        clockedInAt: new Date('2026-08-24T12:00:00.000Z'),
+        // 90 minutes and 40 seconds — rounds UP to 91, where a floor gave 90.
+        clockedOutAt: new Date('2026-08-24T13:30:40.000Z'),
+        status: 'CLOCKED',
+      },
+    })
+    const page = await listEntries(admin, { userId: staffId })
+    expect(page.entries[0]?.minutes).toBe(91)
+    expect(page.totalMinutes).toBe(91)
+  })
+
+  it('rounds a part-minute DOWN when it is under the half', async () => {
+    const entry = await clockIn(staff)
+    await prisma.timeEntry.update({
+      where: { id: entry.id },
+      data: {
+        clockedInAt: new Date('2026-08-24T12:00:00.000Z'),
+        clockedOutAt: new Date('2026-08-24T13:30:20.000Z'),
+        status: 'CLOCKED',
+      },
+    })
+    const page = await listEntries(admin, { userId: staffId })
+    expect(page.entries[0]?.minutes).toBe(90)
+  })
+
   it('clocks out and derives the minutes', async () => {
     const opened = await clockIn(staff)
     // Reach past the service to age it — the alternative is a two-hour test.

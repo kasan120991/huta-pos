@@ -12,8 +12,8 @@
 //     append-only. Nothing deletes from them.
 
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
   // Prisma 7 defaults to emitting internal imports with `.ts` extensions, which do not
   // compile under a conventional NodeNext build without `allowImportingTsExtensions`.
   importFileExtension = "js"
@@ -104,6 +104,20 @@ enum ShiftStatus {
 ///            GUESS and every figure derived from it must say so.
 /// CORRECTED— an admin supplied the real end time afterwards.
 /// VOIDED   — an admin discarded the entry. Excluded from every total, never deleted.
+/// The life of a pay run. There is deliberately NO draft: a run is born COMMITTED, and the
+/// preview is a pure computation with no row behind it.
+enum PayRunStatus {
+  COMMITTED
+  REVERSED
+}
+
+/// How wages left the business. Only CASH touches a drawer.
+enum PayoutMethod {
+  CASH
+  CHECK
+  BANK
+}
+
 enum TimeEntryStatus {
   OPEN
   CLOCKED
@@ -181,9 +195,9 @@ model Store {
   promotionStores    PromotionStore[]
   transfersRequested TransferRequest[]   @relation("RequestingStore")
   transfersSourced   TransferRequest[]   @relation("SourceStore")
+  timeEntries        TimeEntry[]
 
   @@index([active])
-  timeEntries TimeEntry[]
 }
 
 model User {
@@ -214,10 +228,10 @@ model User {
   /// forces a change at the next sign-in and clears it. Deliberately NOT a CHECK against
   /// pinHash: a person can legitimately have a permanent PIN and this flag false, or a
   /// temporary PIN and this flag true, and nothing else is a valid combination to police.
-  mustChangePin     Boolean   @default(false)
+  mustChangePin Boolean @default(false)
 
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   refreshTokens         RefreshToken[]
   movements             InventoryMovement[]
@@ -243,6 +257,13 @@ model User {
   auditLogs             AuditLog[]
   pairingCodesCreated   TerminalPairingCode[]
   stepUpGrants          StepUpGrant[]         @relation("StepUpApprover")
+  wageRates             WageRate[]            @relation("WageRateSubject")
+  wageRatesSet          WageRate[]            @relation("WageRateSetter")
+  payLines              PayLine[]
+  payRunsCommitted      PayRun[]              @relation("PayRunCommitter")
+  payRunsReversed       PayRun[]              @relation("PayRunReverser")
+  payoutsPaid           PayPayout[]           @relation("PayoutPayer")
+  payoutsReversed       PayPayout[]           @relation("PayoutReverser")
 
   /// A PIN identifies exactly one person, GLOBALLY.
   ///
@@ -259,28 +280,28 @@ model User {
 /// A registered POS device. Establishes WHICH STORE a terminal belongs to; the staff
 /// PIN establishes WHO is acting. Two separate layers on purpose.
 model Terminal {
-  id        String   @id @default(cuid())
-  storeId   String
-  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  name      String
+  id         String    @id @default(cuid())
+  storeId    String
+  store      Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name       String
   /// SHA-256 of the device token. The raw token is shown once at registration.
-  tokenHash String   @unique
-  active    Boolean  @default(true)
+  tokenHash  String    @unique
+  active     Boolean   @default(true)
   lastSeenAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
-  shifts       Shift[]
-  sales        Sale[]
-  pairingCodes TerminalPairingCode[]
-  stepUpGrants StepUpGrant[]
+  shifts         Shift[]
+  sales          Sale[]
+  pairingCodes   TerminalPairingCode[]
+  stepUpGrants   StepUpGrant[]
+  timeEntriesIn  TimeEntry[]           @relation("TimeEntryInTerminal")
+  timeEntriesOut TimeEntry[]           @relation("TimeEntryOutTerminal")
 
   /// Stable key for upserts. Without it the seed can only key on tokenHash, which means
   /// regenerating a device token silently creates a SECOND terminal.
   @@unique([storeId, name])
   @@index([storeId, active])
-  timeEntriesIn  TimeEntry[] @relation("TimeEntryInTerminal")
-  timeEntriesOut TimeEntry[] @relation("TimeEntryOutTerminal")
 }
 
 /// One-time code an admin generates so a new register can enrol itself.
@@ -321,10 +342,10 @@ model StepUpGrant {
 
   /// The capability this grant authorises, e.g. "refund.issue". A grant is valid for
   /// exactly one action; it is not a general elevation.
-  action      String
-  expiresAt   DateTime
-  consumedAt  DateTime?
-  createdAt   DateTime  @default(now())
+  action     String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
 
   @@index([adminUserId, createdAt])
   @@index([expiresAt])
@@ -363,14 +384,14 @@ model StoreCounter {
 /// Reference table, NOT an enum — the product mix shifts and adding a category must
 /// be a row insert an admin can do, not a migration plus a deploy.
 model Category {
-  id        String  @id @default(cuid())
+  id        String     @id @default(cuid())
   name      String
-  slug      String  @unique
+  slug      String     @unique
   parentId  String?
   parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
   children  Category[] @relation("CategoryTree")
-  sortOrder Int     @default(0)
-  active    Boolean @default(true)
+  sortOrder Int        @default(0)
+  active    Boolean    @default(true)
 
   /// Fallback reorder point in BASE UNITS, used when a StockLevel sets none of its own.
   /// Items for an EACH category, MILLIGRAMS for flower. Null means variants in this
@@ -398,29 +419,29 @@ model Cannabinoid {
 }
 
 model Supplier {
-  id                 String  @id @default(cuid())
-  name               String
-  slug               String  @unique
-  contactName        String?
-  phone              String?
-  email              String?
-  website            String?
-  addressLine1       String?
-  addressLine2       String?
-  city               String?
-  state              String?
-  postalCode         String?
-  accountNumber      String?
+  id                String  @id @default(cuid())
+  name              String
+  slug              String  @unique
+  contactName       String?
+  phone             String?
+  email             String?
+  website           String?
+  addressLine1      String?
+  addressLine2      String?
+  city              String?
+  state             String?
+  postalCode        String?
+  accountNumber     String?
   /// Free text, e.g. "Net 30".
-  paymentTerms       String?
-  minimumOrderCents  Int?
-  licenseNumber      String?
-  notes              String?
+  paymentTerms      String?
+  minimumOrderCents Int?
+  licenseNumber     String?
+  notes             String?
   /// Inactive suppliers drop out of pickers but keep all of their history.
-  active             Boolean @default(true)
+  active            Boolean @default(true)
   /// Primary key from the legacy `huta-old` MySQL database. Makes the import
   /// re-runnable without creating duplicates.
-  legacyId           String? @unique
+  legacyId          String? @unique
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -807,7 +828,7 @@ model InventoryMovement {
   batchId   String?
   batch     Batch?         @relation(fields: [batchId], references: [id], onDelete: Restrict)
 
-  type MovementType
+  type             MovementType
   /// SIGNED delta in base units. Negative for SALE, TRANSFER_OUT, SHRINKAGE.
   quantityBase     Int
   /// StockLevel.quantityBase immediately after this movement. Lets an audit verify
@@ -817,7 +838,7 @@ model InventoryMovement {
   /// The unit cost this movement came in at — per item for EACH, per GRAM for WEIGHT.
   /// Set on RECEIVE; null on movements that carry no new cost information.
   /// ADMIN-ONLY: must be stripped from any response to a staff principal.
-  unitCostCents Int?
+  unitCostCents       Int?
   /// StockLevel.costBasisCents immediately after this movement — the cost counterpart of
   /// balanceAfterBase, and what makes "why did the average cost move" answerable without
   /// replaying the whole ledger.
@@ -942,14 +963,14 @@ model PurchaseOrder {
   /// a gap in a sequence someone later reconciles against.
   number Int?
 
-  orderedAt  DateTime
-  expectedAt DateTime?
+  orderedAt       DateTime
+  expectedAt      DateTime?
   /// Time to FIRST delivery.
-  firstReceiptAt   DateTime?
+  firstReceiptAt  DateTime?
   /// Time to FULL fulfillment. A partial that finishes three weeks later is not a
   /// two-day lead time, so both are tracked.
-  fullyReceivedAt  DateTime?
-  cancelledAt      DateTime?
+  fullyReceivedAt DateTime?
+  cancelledAt     DateTime?
 
   notes String?
 
@@ -973,7 +994,7 @@ model PurchaseOrderLine {
   variant         ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
 
   /// Base units. Flower is ordered by weight through this same column.
-  quantityBase Int
+  quantityBase  Int
   /// ADMIN-ONLY. Cost per gram for WEIGHT variants.
   unitCostCents Int?
 
@@ -1033,7 +1054,7 @@ model ReceiptLine {
   batch     Batch?         @relation(fields: [batchId], references: [id], onDelete: Restrict)
 
   /// Base units. Staff key grams for flower; the client converts at the boundary.
-  quantityBase Int
+  quantityBase  Int
   /// ADMIN-ONLY: never returned to a staff principal. Defaults from the linked
   /// PurchaseOrderLine when there is one; otherwise an admin sets it afterward.
   unitCostCents Int?
@@ -1104,12 +1125,12 @@ model Shift {
   terminalId String?
   terminal   Terminal? @relation(fields: [terminalId], references: [id], onDelete: SetNull)
 
-  openedById       String
-  openedBy         User     @relation("ShiftOpener", fields: [openedById], references: [id], onDelete: Restrict)
-  openedAt         DateTime @default(now())
+  openedById           String
+  openedBy             User     @relation("ShiftOpener", fields: [openedById], references: [id], onDelete: Restrict)
+  openedAt             DateTime @default(now())
   /// What was COUNTED in the drawer at open. Cash carries over between shifts and days, so
   /// this is a carried balance, not a float — it is only a float on the day a store opens.
-  openingCashCents Int
+  openingCashCents     Int
   /// What the previous close at this store left behind. NULL for the first drawer a store
   /// ever opens, which is a different fact from zero.
   openingExpectedCents Int?
@@ -1153,16 +1174,21 @@ model Shift {
 }
 
 model CashMovement {
-  id      String           @id @default(cuid())
-  shiftId String
-  shift   Shift            @relation(fields: [shiftId], references: [id], onDelete: Restrict)
-  type    CashMovementType
+  id          String           @id @default(cuid())
+  shiftId     String
+  shift       Shift            @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  type        CashMovementType
   /// Always positive; the type determines direction.
   amountCents Int
   reason      String
   userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Restrict)
-  createdAt   DateTime @default(now())
+  user        User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  createdAt   DateTime         @default(now())
+
+  /// Set when this movement IS a payroll disbursement, or the reversal of one. Payroll owns
+  /// the reference; nothing here needs to know about wages.
+  payout         PayPayout? @relation("PayoutCash")
+  payoutReversal PayPayout? @relation("PayoutReversalCash")
 
   @@index([shiftId])
 }
@@ -1266,9 +1292,9 @@ model Sale {
 
   /// Required on any sale containing a cannabinoid-bearing product. This is a
   /// compliance record, not a UI-only prompt.
-  ageVerified       Boolean   @default(false)
-  ageVerifiedById   String?
-  ageVerifiedBy     User?     @relation("SaleAgeVerifier", fields: [ageVerifiedById], references: [id], onDelete: SetNull)
+  ageVerified     Boolean @default(false)
+  ageVerifiedById String?
+  ageVerifiedBy   User?   @relation("SaleAgeVerifier", fields: [ageVerifiedById], references: [id], onDelete: SetNull)
 
   voidedAt   DateTime?
   voidedById String?
@@ -1278,10 +1304,10 @@ model Sale {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  lines              SaleLine[]
-  payments           Payment[]
-  refunds            Refund[]
-  movements          InventoryMovement[]
+  lines               SaleLine[]
+  payments            Payment[]
+  refunds             Refund[]
+  movements           InventoryMovement[]
   loyaltyTransactions LoyaltyTransaction[]
 
   @@unique([storeId, number])
@@ -1325,8 +1351,8 @@ model SaleLine {
   unitCostCents Int?
   /// Resolved at sale time — from the batch when batch tracking is live, otherwise
   /// from Product.primarySupplierId.
-  supplierId String?
-  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  supplierId    String?
+  supplier      Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
 
   /// Which pricing rules actually applied. Without these a receipt cannot be
   /// explained after a price change and promo performance cannot be measured.
@@ -1399,11 +1425,11 @@ model Payment {
   /// CARD only.
   stripePaymentIntentId String? @unique
   /// CARD only — from the retrieved intent, so the receipt can say "VISA ····4242".
-  cardBrand String?
-  cardLast4 String?
+  cardBrand             String?
+  cardLast4             String?
   /// CASH only.
-  cashTenderedCents Int?
-  cashChangeCents   Int?
+  cashTenderedCents     Int?
+  cashChangeCents       Int?
 
   failureReason String?
   createdAt     DateTime @default(now())
@@ -1422,9 +1448,9 @@ model Payment {
 /// drawer arithmetic uniform: the voided sale's cash payment still counts as cash taken
 /// and its cash refund subtracts. Reporting must not assume one refund carries lines.
 model Refund {
-  id        String  @id @default(cuid())
+  id        String   @id @default(cuid())
   saleId    String
-  sale      Sale    @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  sale      Sale     @relation(fields: [saleId], references: [id], onDelete: Restrict)
   paymentId String?
   payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: Restrict)
 
@@ -1435,7 +1461,7 @@ model Refund {
   shift   Shift?  @relation(fields: [shiftId], references: [id], onDelete: Restrict)
 
   refundedById String
-  refundedBy   User   @relation("RefundIssuer", fields: [refundedById], references: [id], onDelete: Restrict)
+  refundedBy   User    @relation("RefundIssuer", fields: [refundedById], references: [id], onDelete: Restrict)
   /// The admin whose step-up grant authorised this refund. Policy (2026-08-18): every
   /// refund and void requires one — staff and admins alike.
   approvedById String?
@@ -1514,4 +1540,196 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([userId, createdAt])
   @@index([action, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Payroll
+// ---------------------------------------------------------------------------
+
+/// An hourly wage, effective from a date onward.
+///
+/// Effective-dated rather than a mutable column on `User`, for the reason every price and
+/// cost on a `SaleLine` is snapshotted: a raise keyed on Wednesday must not silently reprice
+/// the Sunday before it. There is no `effectiveTo` — the next row ends this one, the same
+/// rule that keeps a duration column off `TimeEntry`. Employment ending is `User.active`.
+///
+/// ⚠️ `effectiveFrom` is ALWAYS a Sunday 00:00 in the store timezone, snapped backward from
+/// whatever date was supplied. That is what guarantees a workweek has exactly one rate, which
+/// in turn means FLSA's blended-regular-rate rule (29 CFR 778.115, two rates inside one week)
+/// can never fire and never has to be implemented. Backward rather than forward so setting a
+/// new hire's rate on their start date covers their first, partial week.
+model WageRate {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation("WageRateSubject", fields: [userId], references: [id], onDelete: Restrict)
+
+  ratePerHourCents  Int
+  /// The Sunday instant this rate begins.
+  effectiveFrom     DateTime
+  /// The same Sunday as `YYYY-MM-DD` — what the screen shows, and what the day-of-week CHECK
+  /// can be written against without a timezone appearing inside SQL.
+  effectiveFromDate String
+
+  setById String
+  setBy   User    @relation("WageRateSetter", fields: [setById], references: [id], onDelete: Restrict)
+  note    String?
+
+  createdAt DateTime @default(now())
+
+  payWeeks PayWeek[]
+
+  /// Deliberately NOT unique on (userId, effectiveFromDate): keying a second rate for the
+  /// same Sunday is how a typo gets corrected, and the wrong one survives as history.
+  /// Resolution takes the greatest effectiveFrom, breaking ties on createdAt then id.
+  @@index([userId, effectiveFrom])
+}
+
+/// One committed fortnight of gross pay.
+///
+/// GROSS ONLY. Nothing here withholds tax; the figure goes to a payroll provider. Append-only
+/// — a mistake is REVERSED and re-run, never edited, because a committed total is what an
+/// accountant was handed and two different numbers must not share one identity.
+///
+/// Has no store. People work at both locations since 2026-08-22, so hours and therefore pay
+/// are business-wide; only the till a cash payout leaves from is store-scoped. That is also
+/// why there is no `StoreCounter` number — the counter is keyed by store, and the period
+/// ("23 Aug – 5 Sep") identifies a run better than a serial would.
+model PayRun {
+  id String @id @default(cuid())
+
+  /// The Sunday the fortnight opens. The run's identity.
+  periodStartDate String
+  /// Half-open [start, end). Resolved with `zonedStartOfWeek`, never by adding 14 days —
+  /// a fortnight spanning a DST change is 13d23h or 14d1h, not 14d.
+  periodStart     DateTime
+  periodEnd       DateTime
+  /// SNAPSHOT. A later change to `Store.timezone` must not re-date a committed run.
+  timezone        String
+
+  status PayRunStatus @default(COMMITTED)
+
+  totalMinutes    Int
+  overtimeMinutes Int
+  regularCents    Int
+  overtimeCents   Int
+  grossCents      Int
+
+  committedById String
+  committedBy   User     @relation("PayRunCommitter", fields: [committedById], references: [id], onDelete: Restrict)
+  committedAt   DateTime @default(now())
+
+  reversedById String?
+  reversedBy   User?     @relation("PayRunReverser", fields: [reversedById], references: [id], onDelete: Restrict)
+  reversedAt   DateTime?
+  /// Required on a reversal — a reversed pay run without a reason is not an audit trail.
+  reversalNote String?
+
+  note String?
+
+  lines PayLine[]
+
+  /// Only one LIVE run per fortnight; a reversed one must not block the re-run. Expressed as
+  /// a partial unique index in the migration, which Prisma cannot declare.
+  @@index([periodStart])
+  @@index([status, periodStart])
+}
+
+/// One person's pay for one run.
+///
+/// ⚠️ No rate column. A person can sit on two different rates across the two weeks, so a
+/// single rate here would be a lie — the same reason `PriceTier` stores the total and never
+/// the derived rate. `grossCents` is authoritative; never multiply it back out of anything.
+model PayLine {
+  id       String @id @default(cuid())
+  payRunId String
+  payRun   PayRun @relation(fields: [payRunId], references: [id], onDelete: Restrict)
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  totalMinutes    Int
+  regularMinutes  Int
+  overtimeMinutes Int
+  regularCents    Int
+  overtimeCents   Int
+  grossCents      Int
+
+  createdAt DateTime @default(now())
+
+  weeks   PayWeek[]
+  payouts PayPayout[]
+
+  @@unique([payRunId, userId])
+  @@index([userId])
+}
+
+/// One workweek inside a pay line — where overtime is actually decided.
+///
+/// Exists as its own table because the FLSA threshold applies PER WORKWEEK, not per period: a
+/// fortnight of 45 + 35 hours owes five hours of overtime while the same eighty hours as
+/// 40 + 40 owes none. It is also the level at which the rate is constant, which is what lets
+/// the arithmetic be asserted in SQL.
+model PayWeek {
+  id        String  @id @default(cuid())
+  payLineId String
+  payLine   PayLine @relation(fields: [payLineId], references: [id], onDelete: Cascade)
+
+  /// The Sunday this week opens.
+  weekStartDate String
+  weekStart     DateTime
+  weekEnd       DateTime
+
+  minutesWorked   Int
+  regularMinutes  Int
+  overtimeMinutes Int
+
+  /// SNAPSHOT of the rate in force for this week. Resolution must not be re-run years later
+  /// against a table that has since grown rows.
+  ratePerHourCents Int
+  /// Provenance only. SetNull so a wage row can never be blocked from view by a pay record.
+  wageRateId       String?
+  wageRate         WageRate? @relation(fields: [wageRateId], references: [id], onDelete: SetNull)
+
+  regularCents  Int
+  overtimeCents Int
+  grossCents    Int
+
+  @@unique([payLineId, weekStartDate])
+}
+
+/// Money actually handed over against a pay line.
+///
+/// A line may be paid in parts, and each part records HOW. Only CASH touches a drawer, and
+/// when it does it MUST have written the `CashMovement` — otherwise cash leaves the till with
+/// nothing in the ledger and the next close reports a shortfall nobody can explain.
+model PayPayout {
+  id        String  @id @default(cuid())
+  payLineId String
+  payLine   PayLine @relation(fields: [payLineId], references: [id], onDelete: Restrict)
+
+  method      PayoutMethod
+  /// Always positive. The record's existence carries the direction, as `CashMovement` does.
+  amountCents Int
+  /// Check number, transfer id — whatever the accountant reconciles against.
+  reference   String?
+  note        String?
+
+  /// CASH only, and required for CASH. This is the drawer link that makes `closeShift`'s
+  /// existing arithmetic account for payroll with no change to the shift service at all.
+  cashMovementId String?       @unique
+  cashMovement   CashMovement? @relation("PayoutCash", fields: [cashMovementId], references: [id], onDelete: Restrict)
+
+  paidById String
+  paidBy   User     @relation("PayoutPayer", fields: [paidById], references: [id], onDelete: Restrict)
+  paidAt   DateTime @default(now())
+
+  reversedById           String?
+  reversedBy             User?         @relation("PayoutReverser", fields: [reversedById], references: [id], onDelete: Restrict)
+  reversedAt             DateTime?
+  reversalNote           String?
+  /// The compensating PAID_IN, written into whichever shift is open at reversal time — the
+  /// rule `Refund.shiftId` already follows: money comes back to today's till, not last week's.
+  reversalCashMovementId String?       @unique
+  reversalCashMovement   CashMovement? @relation("PayoutReversalCash", fields: [reversalCashMovementId], references: [id], onDelete: Restrict)
+
+  @@index([payLineId])
 }

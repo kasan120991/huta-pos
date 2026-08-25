@@ -53,6 +53,12 @@ type _ShiftStatus = Assert<SameEnum<typeof Shared.ShiftStatus, typeof Prisma.Shi
 type _TimeEntryStatus = Assert<
   SameEnum<typeof Shared.TimeEntryStatus, typeof Prisma.TimeEntryStatus>
 >
+type _PayRunStatus = Assert<
+  SameEnum<typeof Shared.PayRunStatus, typeof Prisma.PayRunStatus>
+>
+type _PayoutMethod = Assert<
+  SameEnum<typeof Shared.PayoutMethod, typeof Prisma.PayoutMethod>
+>
 type _CashMovementType = Assert<
   SameEnum<typeof Shared.CashMovementType, typeof Prisma.CashMovementType>
 >

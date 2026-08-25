@@ -123,6 +123,37 @@ export const TIME_ENTRY_STATUS_VALUES = Object.values(
   TimeEntryStatus,
 ) as readonly TimeEntryStatus[]
 
+/**
+ * The life of a pay run. There is deliberately NO draft.
+ *
+ * A run is born COMMITTED — the preview is a pure computation with no row behind it. A draft
+ * would be a second candidate for the narrow purchase-order hard-delete exception, and a pay
+ * record is exactly the sort of thing that must never be deleted.
+ */
+export const PayRunStatus = {
+  COMMITTED: 'COMMITTED',
+  /** Superseded. Its lines and weeks keep the figures that were committed — that is what
+   *  makes a reversal an audit record rather than an erasure. */
+  REVERSED: 'REVERSED',
+} as const
+export type PayRunStatus = (typeof PayRunStatus)[keyof typeof PayRunStatus]
+export const PAY_RUN_STATUS_VALUES = Object.values(PayRunStatus) as readonly PayRunStatus[]
+
+/**
+ * How wages actually left the business.
+ *
+ * Separate from `PaymentMethod`, which is customer money coming IN. Three values rather than
+ * CASH/EXTERNAL because "how was this paid" genuinely has three answers, and collapsing two
+ * then disambiguating through a free-text reference is worse. Only CASH touches a drawer.
+ */
+export const PayoutMethod = {
+  CASH: 'CASH',
+  CHECK: 'CHECK',
+  BANK: 'BANK',
+} as const
+export type PayoutMethod = (typeof PayoutMethod)[keyof typeof PayoutMethod]
+export const PAYOUT_METHOD_VALUES = Object.values(PayoutMethod) as readonly PayoutMethod[]
+
 export const CashMovementType = {
   PAID_IN: 'PAID_IN',
   PAID_OUT: 'PAID_OUT',

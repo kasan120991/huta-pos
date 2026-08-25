@@ -37,6 +37,16 @@ export type Cents = Brand<number, 'Cents'>
 export type CentsPerGram = Brand<number, 'CentsPerGram'>
 
 /**
+ * An hourly wage, in cents. Deliberately a different brand from `Cents`, for exactly the
+ * reason `CentsPerGram` is: a shared brand would let `addCents(rate, grossPay)` typecheck.
+ *
+ * The unit it multiplies is MINUTES, not hours — `TimeEntry` measures whole minutes — so the
+ * extension divides by 60. See `extendPerHour` in `payroll.ts`; never multiply a rate by a
+ * count of hours-as-a-float.
+ */
+export type CentsPerHour = Brand<number, 'CentsPerHour'>
+
+/**
  * Stock, in a variant's base unit. The unit depends on `trackingMode`: items for `EACH`,
  * MILLIGRAMS for `WEIGHT`. 3.5g is 3500.
  */
@@ -78,6 +88,13 @@ export function centsPerGram(n: number): CentsPerGram {
   return n as CentsPerGram
 }
 
+/** Non-negative — nobody is paid a negative wage, and a zero rate is a blocker, not a rate. */
+export function centsPerHour(n: number): CentsPerHour {
+  assertSafeInteger(n, 'CentsPerHour')
+  if (n <= 0) throw new UnitError(`CentsPerHour must be positive, got ${n}`)
+  return n as CentsPerHour
+}
+
 /** Non-negative. For signed movement deltas use `baseDelta`. */
 export function baseQuantity(n: number): BaseQuantity {
   assertSafeInteger(n, 'BaseQuantity')
@@ -108,6 +125,7 @@ export function bps(n: number): Bps {
 export const unsafe = {
   cents: (n: number): Cents => n as Cents,
   centsPerGram: (n: number): CentsPerGram => n as CentsPerGram,
+  centsPerHour: (n: number): CentsPerHour => n as CentsPerHour,
   baseQuantity: (n: number): BaseQuantity => n as BaseQuantity,
   bps: (n: number): Bps => n as Bps,
 } as const

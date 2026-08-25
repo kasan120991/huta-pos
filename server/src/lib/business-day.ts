@@ -80,6 +80,60 @@ export function dayKey(at: Date, timeZone: string): string {
 }
 
 /**
+ * The day the workweek begins — Sunday. A CONSTANT, never a store setting.
+ *
+ * FLSA requires the workweek to be a fixed, recurring 168-hour period; changing it is
+ * permitted only if the change is permanent and not designed to evade overtime. A
+ * configurable week start would make that rule impossible to honour, and would silently
+ * re-cut every historical overtime calculation the moment someone edited it.
+ */
+export const WORKWEEK_START_DOW = 0
+
+/**
+ * The instant the workweek containing `date` begins — 00:00 local to `timeZone` on the
+ * Sunday of that week — plus `addWeeks` whole weeks.
+ *
+ * ⚠️ Delegates to `zonedStartOfDay` rather than doing its own arithmetic, and that is
+ * load-bearing here in a way it is not elsewhere: US daylight-saving transitions land at
+ * 02:00 **on a Sunday**, which is inside the opening hours of a workweek. Both 2026
+ * transitions (8 March, 1 November) fall exactly on a week boundary.
+ *
+ * The day-of-week is read from `Date.UTC(...).getUTCDay()`, which is correct for a bare
+ * calendar date in any zone — the date string carries no offset, so no zone is involved in
+ * deciding which day of the week it names.
+ */
+export function zonedStartOfWeek(date: string, timeZone: string, addWeeks = 0): Date {
+  const [year, month, day] = date.split('-').map(Number) as [number, number, number]
+  const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay()
+  const backToWeekStart = (dow - WORKWEEK_START_DOW + 7) % 7
+  return zonedStartOfDay(date, timeZone, addWeeks * 7 - backToWeekStart)
+}
+
+/** `YYYY-MM-DD` of the Sunday whose workweek contains the instant `at`. */
+export function weekStartDateOf(at: Date, timeZone: string): string {
+  const day = dayKey(at, timeZone)
+  const [year, month, date] = day.split('-').map(Number) as [number, number, number]
+  const dow = new Date(Date.UTC(year, month - 1, date)).getUTCDay()
+  const shifted = new Date(Date.UTC(year, month - 1, date - ((dow - WORKWEEK_START_DOW + 7) % 7)))
+  return shifted.toISOString().slice(0, 10)
+}
+
+/**
+ * Whole weeks between two bare `YYYY-MM-DD` week starts.
+ *
+ * Calendar arithmetic on UTC-normalised components, never on zoned instants — the dates carry
+ * no offset, so no DST correction applies and none should. This is the "elapsed days between
+ * two instants is a DIFFERENT thing" distinction this module already draws.
+ */
+export function weeksBetween(fromDate: string, toDate: string): number {
+  const parse = (d: string) => {
+    const [y, m, day] = d.split('-').map(Number) as [number, number, number]
+    return Date.UTC(y, m - 1, day)
+  }
+  return Math.round((parse(toDate) - parse(fromDate)) / (86_400_000 * 7))
+}
+
+/**
  * The hour of the business day, 0–23, local to `timeZone`.
  *
  * Lives here rather than beside its one caller for the same reason everything else in this

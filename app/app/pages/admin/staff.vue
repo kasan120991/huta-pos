@@ -48,6 +48,7 @@ import {
 } from '~/components/ui/dialog'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '~/components/ui/empty'
 import { Field, FieldError, FieldGroup, FieldLabel } from '~/components/ui/field'
+import { InputGroup, InputGroupAddon, InputGroupInput } from '~/components/ui/input-group'
 import { Input } from '~/components/ui/input'
 import {
   Select,
@@ -69,6 +70,9 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '~/components/ui/tabs'
 import { Toggle } from '~/components/ui/toggle'
 import { ToggleGroup, ToggleGroupItem } from '~/components/ui/toggle-group'
+import type { PersonPaySummary, WageRateRow } from '@huta/shared/schemas'
+import { formatMinutesAsHours } from '@huta/shared'
+import { dollars, parseDollars } from '~/lib/money'
 import { ApiError, apiFetch } from '~/composables/useApi'
 import { money, varianceView } from '~/lib/sale-format'
 import { Clock, UserX } from '@lucide/vue'
@@ -474,6 +478,97 @@ const auditLabel = (action: string) => AUDIT_LABELS[action] ?? action
 /* ————— the Hours tab ————— */
 const hours = ref<TimeEntryPage | null>(null)
 const hoursLoading = ref(false)
+/* ————— wage and pay (Kasan's picks A + B, 2026-08-24) ————— */
+
+/**
+ * ⚠️ GROSS pay throughout. Nothing in this system withholds tax, so no figure here is
+ * take-home and none of them may be labelled as such.
+ */
+const wageRates = ref<WageRateRow[]>([])
+const pay = ref<PersonPaySummary | null>(null)
+const wageLoading = ref(false)
+
+const currentWage = computed(() => wageRates.value.find((r) => r.current) ?? null)
+const earlierWages = computed(() => wageRates.value.filter((r) => !r.current))
+
+async function loadWage(id: string) {
+  wageLoading.value = true
+  try {
+    const data = await apiFetch<{ rates: WageRateRow[] }>(`/payroll/wages/${id}`)
+    if (selectedId.value !== id) return
+    wageRates.value = data.rates
+  } catch {
+    wageRates.value = []
+  } finally {
+    if (selectedId.value === id) wageLoading.value = false
+  }
+}
+
+async function loadPay(id: string) {
+  try {
+    const data = await apiFetch<PersonPaySummary>(`/payroll/people/${id}`)
+    if (selectedId.value !== id) return
+    pay.value = data
+  } catch {
+    pay.value = null
+  }
+}
+
+/* the wage dialog */
+const wageOpen = ref(false)
+const wageAmount = ref('')
+const wageFrom = ref('')
+const wageNote = ref('')
+const wageError = ref<string | null>(null)
+const wageSaving = ref(false)
+
+function startWage() {
+  wageAmount.value = currentWage.value ? dollars(currentWage.value.ratePerHourCents) : ''
+  wageFrom.value = new Date().toISOString().slice(0, 10)
+  wageNote.value = ''
+  wageError.value = null
+  wageOpen.value = true
+}
+
+const wageCents = computed(() => parseDollars(wageAmount.value))
+const wageValid = computed(() => wageCents.value !== null && wageCents.value > 0 && wageFrom.value !== '')
+
+/** The Sunday the chosen date falls in — what the server will actually store. */
+const wageSunday = computed(() => {
+  if (!wageFrom.value) return null
+  const [y, m, d] = wageFrom.value.split('-').map(Number) as [number, number, number]
+  const at = new Date(Date.UTC(y, m - 1, d))
+  at.setUTCDate(at.getUTCDate() - at.getUTCDay())
+  return at.toISOString().slice(0, 10)
+})
+
+async function saveWage() {
+  if (!wageValid.value || !selectedId.value || wageSaving.value) return
+  wageSaving.value = true
+  wageError.value = null
+  try {
+    await apiFetch(`/payroll/wages/${selectedId.value}`, {
+      method: 'POST',
+      body: {
+        ratePerHourCents: wageCents.value,
+        effectiveFrom: wageFrom.value,
+        ...(wageNote.value.trim() ? { note: wageNote.value.trim() } : {}),
+      },
+    })
+    wageOpen.value = false
+    await loadWage(selectedId.value)
+    await loadPay(selectedId.value)
+  } catch (err) {
+    wageError.value = err instanceof ApiError ? err.message : 'Something went wrong.'
+  } finally {
+    wageSaving.value = false
+  }
+}
+
+const perHour = (cents: number) => `${money(cents)}/hr`
+const payDay = (d: string) =>
+  new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(`${d}T12:00:00`))
+
 const RANGES = [
   { key: '7', label: 'Last 7 days' },
   { key: '30', label: 'Last 30 days' },
@@ -528,10 +623,14 @@ const hourDays = computed(() => {
   return [...groups.values()]
 })
 
-function hm(total: number): string {
-  const h = Math.floor(total / 60)
-  return h > 0 ? `${h}h ${total % 60}m` : `${total}m`
-}
+/**
+ * Durations render through the SHARED formatter, not a local copy.
+ *
+ * The local one printed "82h 0m" where the payroll page printed "82h" — the same duration,
+ * two spellings, on two screens showing the same person's fortnight. Caught the day the Pay
+ * tab landed beside it.
+ */
+const hm = (total: number): string => formatMinutesAsHours(total)
 
 const clockTime = (iso: string) =>
   new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
@@ -579,6 +678,15 @@ watch(selectedId, (id) => {
   historyFilter.value = 'all'
   if (id) void loadPerson(id)
 }, { immediate: true })
+watch(selectedId, (id) => {
+  wageRates.value = []
+  pay.value = null
+  if (id) {
+    void loadWage(id)
+    void loadPay(id)
+  }
+}, { immediate: true })
+
 watch([tab, range], () => {
   if (tab.value === 'hours' && selectedId.value) void loadHours(selectedId.value)
 })
@@ -743,6 +851,7 @@ watch([tab, range], () => {
         <TabsList variant="line">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger v-if="selected.role === 'STAFF'" value="hours">Hours</TabsTrigger>
+          <TabsTrigger v-if="selected.role === 'STAFF'" value="pay">Pay</TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
 
@@ -794,7 +903,7 @@ watch([tab, range], () => {
             </div>
           </div>
 
-          <div class="grid gap-4 md:grid-cols-2">
+          <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div class="rounded-xl border p-4">
               <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Identity</p>
               <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
@@ -824,6 +933,44 @@ watch([tab, range], () => {
                 <dd>{{ selected.active ? 'Active' : 'Deactivated' }}</dd>
               </dl>
             </div>
+
+            <!--
+              The wage sits with the other facts about a person rather than behind a tab —
+              it is looked at the way Role and Store are. Admins have no wage: they are not
+              on the clock, so they have no hours to pay for.
+            -->
+            <div v-if="selected.role === 'STAFF'" class="rounded-xl border p-4">
+              <div class="mb-2 flex items-center gap-2">
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Wage</p>
+                <Button variant="outline" size="sm" class="ml-auto h-6 px-2 text-xs" @click="startWage">
+                  {{ currentWage ? 'Change…' : 'Set a wage…' }}
+                </Button>
+              </div>
+
+              <template v-if="currentWage">
+                <p class="text-2xl font-bold tabular-nums">
+                  {{ money(currentWage.ratePerHourCents)
+                  }}<span class="text-sm font-medium text-muted-foreground">/hr</span>
+                </p>
+                <p class="mt-0.5 text-xs text-muted-foreground">
+                  Since Sunday {{ payDay(currentWage.effectiveFromDate) }} · set by {{ currentWage.setByName }}
+                </p>
+                <p v-if="earlierWages.length" class="mt-2 border-t pt-2 text-xs text-muted-foreground">
+                  Earlier ·
+                  <span v-for="(r, i) in earlierWages.slice(0, 3)" :key="r.id">
+                    <template v-if="i > 0">, </template>
+                    <span class="tabular-nums">{{ money(r.ratePerHourCents) }}</span>
+                    from {{ payDay(r.effectiveFromDate) }}
+                  </span>
+                </p>
+              </template>
+              <template v-else>
+                <p class="text-sm text-amber-500">No hourly wage on file.</p>
+                <p class="mt-0.5 text-xs text-muted-foreground">
+                  Payroll cannot run a fortnight this person worked until one is set.
+                </p>
+              </template>
+            </div>
           </div>
 
           <!--
@@ -836,6 +983,113 @@ watch([tab, range], () => {
             (a password versus a PIN). Deactivate them and add them again under the other role.
           </p>
         </TabsContent>
+
+        <!--
+          The Pay tab (Kasan's pick B). Answers the question a person actually asks — "what
+          have I been paid?" — from their own record rather than by opening six pay runs.
+
+          ⚠️ Every figure is GROSS. Totals cover COMMITTED runs only; a reversed run was
+          superseded and counting it would double what somebody earned.
+        -->
+        <TabsContent v-if="selected.role === 'STAFF'" value="pay" class="pt-4">
+          <div v-if="pay && pay.lines.length" class="flex flex-col gap-4">
+            <div class="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+              <div class="rounded-xl border bg-card px-3.5 py-2.5">
+                <div class="text-lg font-bold tabular-nums">
+                  {{ currentWage ? perHour(currentWage.ratePerHourCents) : '—' }}
+                </div>
+                <div class="text-xs text-muted-foreground">Hourly wage</div>
+                <div v-if="currentWage" class="mt-0.5 text-[11px] text-muted-foreground">
+                  since Sun {{ payDay(currentWage.effectiveFromDate) }}
+                </div>
+              </div>
+              <div class="rounded-xl border bg-card px-3.5 py-2.5">
+                <div class="text-lg font-bold tabular-nums text-primary">{{ money(pay.paidCents) }}</div>
+                <div class="text-xs text-muted-foreground">Paid</div>
+                <div class="mt-0.5 text-[11px] text-muted-foreground">
+                  of {{ money(pay.grossCents) }} gross
+                </div>
+              </div>
+              <div class="rounded-xl border bg-card px-3.5 py-2.5">
+                <div
+                  class="text-lg font-bold tabular-nums"
+                  :class="pay.outstandingCents > 0 ? 'text-amber-500' : 'text-muted-foreground'"
+                >
+                  {{ pay.outstandingCents > 0 ? money(pay.outstandingCents) : '—' }}
+                </div>
+                <div class="text-xs text-muted-foreground">Outstanding</div>
+              </div>
+            </div>
+
+            <div class="rounded-xl border bg-card">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Period</TableHead>
+                    <TableHead class="text-right">Hours</TableHead>
+                    <TableHead class="text-right">Overtime</TableHead>
+                    <TableHead class="text-right">Gross</TableHead>
+                    <TableHead>Paid</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow
+                    v-for="l in pay.lines"
+                    :key="l.payLineId"
+                    :class="l.runStatus === 'REVERSED' ? 'opacity-50' : ''"
+                  >
+                    <TableCell>
+                      <NuxtLink
+                        :to="`/admin/payroll/${l.payRunId}`"
+                        class="font-medium text-primary underline-offset-2 hover:underline"
+                      >
+                        {{ payDay(l.periodStartDate) }} – {{ payDay(l.periodEndDate) }}
+                      </NuxtLink>
+                      <span v-if="l.runStatus === 'REVERSED'" class="block text-xs text-red-400">Reversed</span>
+                    </TableCell>
+                    <TableCell class="text-right tabular-nums">{{ hm(l.totalMinutes) }}</TableCell>
+                    <TableCell
+                      class="text-right tabular-nums"
+                      :class="l.overtimeMinutes > 0 ? 'text-amber-500' : 'text-muted-foreground'"
+                    >
+                      {{ l.overtimeMinutes > 0 ? hm(l.overtimeMinutes) : '—' }}
+                    </TableCell>
+                    <TableCell class="text-right font-semibold tabular-nums">{{ money(l.grossCents) }}</TableCell>
+                    <TableCell>
+                      <span
+                        v-if="l.outstandingCents === 0"
+                        class="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary"
+                      >{{ l.methods.length ? l.methods.map((m) => m[0] + m.slice(1).toLowerCase()).join(' + ') : 'Paid' }}</span>
+                      <span
+                        v-else-if="l.paidCents > 0"
+                        class="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-500"
+                      >{{ money(l.paidCents) }} of {{ money(l.grossCents) }}</span>
+                      <span
+                        v-else
+                        class="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-500"
+                      >Unpaid</span>
+                    </TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </div>
+
+            <p class="text-xs text-muted-foreground">
+              Gross, before any deductions — nothing here withholds tax.
+            </p>
+          </div>
+
+          <Empty v-else class="flex-none border">
+            <EmptyHeader>
+              <EmptyMedia variant="icon"><Clock /></EmptyMedia>
+              <EmptyTitle>Not on a pay run yet</EmptyTitle>
+              <EmptyDescription>
+                Pay runs are committed on the Payroll page, a fortnight at a time.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        </TabsContent>
+
 
         <TabsContent v-if="selected.role === 'STAFF'" value="hours" class="pt-4">
           <div class="mb-4 flex flex-wrap items-center gap-3">
@@ -1182,4 +1436,62 @@ watch([tab, range], () => {
       <Spinner aria-hidden="true" />Loading…
     </p>
   </div>
+
+    <!--
+      Setting a wage. The Sunday sentence is not decoration: a rate ALWAYS takes effect from
+      the Sunday of the chosen week, which is what guarantees a workweek carries exactly one
+      rate — and therefore that overtime never has to be computed against a blended rate.
+    -->
+    <Dialog :open="wageOpen" @update:open="(o: boolean) => !o && (wageOpen = false)">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{{ currentWage ? 'Change the wage' : 'Set an hourly wage' }}</DialogTitle>
+          <DialogDescription>
+            {{ selected?.firstName }} {{ selected?.lastName }} · paid by the hour, before tax.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div class="flex flex-col gap-3">
+          <Field>
+            <FieldLabel for="wage-amount" class="text-xs">Hourly rate</FieldLabel>
+            <InputGroup class="h-9">
+              <InputGroupAddon class="text-xs">$</InputGroupAddon>
+              <InputGroupInput
+                id="wage-amount"
+                v-model="wageAmount"
+                inputmode="decimal"
+                autocomplete="off"
+                class="tabular-nums"
+              />
+              <InputGroupAddon align="inline-end" class="text-xs">/hr</InputGroupAddon>
+            </InputGroup>
+          </Field>
+
+          <Field>
+            <FieldLabel for="wage-from" class="text-xs">Effective from</FieldLabel>
+            <Input id="wage-from" v-model="wageFrom" type="date" class="h-9" />
+            <p v-if="wageSunday" class="text-xs text-muted-foreground">
+              Takes effect <span class="font-medium text-foreground">Sunday {{ payDay(wageSunday) }}</span> —
+              every hour that week pays at the new rate, so a week is never split across two rates.
+            </p>
+          </Field>
+
+          <Field>
+            <FieldLabel for="wage-note" class="text-xs">
+              Note <span class="font-normal text-muted-foreground">(optional)</span>
+            </FieldLabel>
+            <Input id="wage-note" v-model="wageNote" autocomplete="off" maxlength="300" class="h-9" placeholder="Annual review…" />
+          </Field>
+
+          <FieldError v-if="wageError">{{ wageError }}</FieldError>
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" @click="wageOpen = false">Cancel</Button>
+          <Button :disabled="!wageValid || wageSaving" @click="saveWage">
+            {{ wageSaving ? 'Saving…' : 'Save wage' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 </template>

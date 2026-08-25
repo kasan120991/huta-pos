@@ -1,3 +1,4 @@
+import { roundHalfUp } from '@huta/shared'
 import type { Principal } from '../auth/principal.js'
 import { assertCan } from '../auth/permissions.js'
 import { prisma } from '../db/client.js'
@@ -77,10 +78,27 @@ const entrySelect = {
 
 type Selected = Awaited<ReturnType<typeof prisma.timeEntry.findFirstOrThrow<{ select: typeof entrySelect }>>>
 
-/** Whole minutes, floored. Null while an entry is still open — there is nothing to measure. */
+/**
+ * Whole minutes, rounded to the NEAREST. Null while an entry is still open — there is
+ * nothing to measure.
+ *
+ * ⚠️ This floored until 2026-08-24, and the change is Kasan's call now that payroll pays from
+ * it. Flooring discarded up to 59 seconds per entry, which over a fortnight of fourteen
+ * entries is up to thirteen minutes — small, but lost SYSTEMATICALLY and always in the
+ * employer's direction, which is the shape of a wage claim rather than a rounding footnote.
+ * Rounding to nearest is directionally neutral: it gives back as often as it takes.
+ *
+ * `roundHalfUp`, not `Math.round`, for the reason its own docblock gives — `Math.round` is
+ * asymmetric about zero. The interval CHECK guarantees a positive duration so the two agree
+ * here, but the asymmetric one has no business anywhere near money.
+ *
+ * The Hours tab renders this same figure, so the timesheet and the payslip cannot disagree.
+ * The register's LIVE elapsed counter deliberately still floors — a clock that is still
+ * running must not claim a minute nobody has worked yet.
+ */
 export function minutesOf(entry: { clockedInAt: Date, clockedOutAt: Date | null }): number | null {
   if (!entry.clockedOutAt) return null
-  return Math.floor((entry.clockedOutAt.getTime() - entry.clockedInAt.getTime()) / 60_000)
+  return roundHalfUp((entry.clockedOutAt.getTime() - entry.clockedInAt.getTime()) / 60_000)
 }
 
 function toRow(e: Selected) {

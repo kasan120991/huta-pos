@@ -1,5 +1,5 @@
 import type { Component } from 'vue'
-import { ArrowLeftRight, Banknote, ClipboardList, Inbox, LayoutGrid, MonitorSmartphone, Package, ReceiptText, Scale, Tag, Truck, Users } from '@lucide/vue'
+import { ArrowLeftRight, Banknote, HandCoins, ClipboardList, Inbox, LayoutGrid, MonitorSmartphone, Package, ReceiptText, Scale, Tag, Truck, Users } from '@lucide/vue'
 
 /**
  * The back-office nav, defined ONCE. The sidebar renders it and the topbar breadcrumb
@@ -39,6 +39,9 @@ export const NAV: NavGroup[] = [
       // put the breadcrumb (Transactions › History) at odds with the heading underneath it —
       // and the breadcrumb resolves against this array precisely so the two cannot drift.
       { title: 'Sales', to: '/admin/sales', icon: ReceiptText },
+      // Payroll files here, not under Store: it is money going out, and it reconciles against
+      // the same drawers Drawers reports on.
+      { title: 'Payroll', to: '/admin/payroll', icon: HandCoins },
     ],
   },
   {
