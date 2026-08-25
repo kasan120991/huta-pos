@@ -839,6 +839,67 @@ const receiptDateFmt = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit',
 })
 const saleNumber = (n: number) => `#${String(n).padStart(4, '0')}`
+
+/**
+ * The one fact the completed sale has to shout.
+ *
+ * A cashier standing at a counter needs exactly one number in the next three seconds, and
+ * which number it is depends on how the sale was paid — so the hero adapts rather than
+ * always reading "change due". Four shapes, all reachable:
+ *
+ *   * cash with change   → count this out
+ *   * cash, exact        → nothing to hand back, say so instead of shouting $0.00
+ *   * card only          → nothing to count; the useful fact is that it was approved
+ *   * split              → cash in a split is an exact applied amount BY DESIGN (the card
+ *                          takes the remainder), so there is never change to give
+ *
+ * A fully discounted sale writes no payments at all, which is the fifth case and the reason
+ * this returns null rather than assuming `payments[0]` exists.
+ */
+const receiptHero = computed(() => {
+  const r = receipt.value
+  if (!r || r.status === 'VOIDED') return null
+
+  const cash = r.payments.find((p) => p.method === 'CASH')
+  const card = r.payments.find((p) => p.method === 'CARD')
+  const cardLabel = card
+    ? `${card.cardBrand ? card.cardBrand.toUpperCase() : 'Card'}${card.cardLast4 ? ` ····${card.cardLast4}` : ''}`
+    : ''
+
+  if (cash && cash.cashChangeCents > 0) {
+    return {
+      tone: 'change' as const,
+      label: 'Change due',
+      figure: fmt(cash.cashChangeCents),
+      note: `from ${fmt(cash.cashTenderedCents)} · total ${fmt(r.totalCents)}`,
+    }
+  }
+  if (cash && card) {
+    return {
+      tone: 'quiet' as const,
+      label: 'Paid in full',
+      figure: fmt(r.totalCents),
+      note: `${fmt(cash.amountCents)} cash + ${fmt(card.amountCents)} on ${cardLabel} · no change`,
+    }
+  }
+  if (cash) {
+    return {
+      tone: 'quiet' as const,
+      label: 'Exact cash',
+      figure: fmt(r.totalCents),
+      note: 'Nothing to hand back',
+    }
+  }
+  if (card) {
+    return {
+      tone: 'quiet' as const,
+      label: 'Paid by card',
+      figure: fmt(r.totalCents),
+      note: `${cardLabel} · approved`,
+    }
+  }
+  return { tone: 'quiet' as const, label: 'Nothing to pay', figure: fmt(0), note: 'Fully discounted' }
+})
 const qtyLabel = (base: number, mode: TrackingMode) =>
   formatQuantity(base as BaseQuantity, mode)
 const taxRateLabel = computed(() => {
@@ -1406,13 +1467,40 @@ const STATUS_BADGE: Record<string, { label: string; class: string }> = {
       :open="receipt !== null && !voidOpen && !stepUpOpen"
       @update:open="(o: boolean) => !o && newSale()"
     >
-      <DialogContent v-if="receipt" class="sm:max-w-sm">
+      <DialogContent v-if="receipt" class="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Sale {{ saleNumber(receipt.number) }} complete</DialogTitle>
+          <DialogTitle>Sale {{ saleNumber(receipt.number) }} Complete</DialogTitle>
           <DialogDescription>
             {{ receipt.storeName }} · {{ receipt.cashierName }} · {{ receiptDateFmt.format(new Date(receipt.createdAt)) }}
           </DialogDescription>
         </DialogHeader>
+
+        <!--
+          The hero. This is a touchscreen read at arm's length with a customer waiting, and
+          until 2026-08-24 the change due was 14px in the tender stack — ranked alongside
+          Subtotal and Tax, which nobody reads back to anyone. It is now the largest thing on
+          the dialog, and it changes with how the sale was paid rather than always claiming
+          there is change to give.
+        -->
+        <div
+          v-if="receiptHero"
+          class="rounded-xl px-5 py-4 text-center"
+          :class="receiptHero.tone === 'change'
+            ? 'border border-primary/40 bg-primary/10'
+            : 'border bg-accent/60'"
+        >
+          <p class="text-[11px] font-bold uppercase tracking-[0.13em] text-muted-foreground">
+            {{ receiptHero.label }}
+          </p>
+          <p
+            class="mt-1 font-extrabold tabular-nums tracking-tight"
+            :class="receiptHero.tone === 'change' ? 'text-5xl text-primary' : 'text-4xl'"
+          >
+            {{ receiptHero.figure }}
+          </p>
+          <p class="mt-1 text-xs text-muted-foreground">{{ receiptHero.note }}</p>
+        </div>
+
         <!-- The receipt block is shared with /register/history and /admin/sales — one
              renderer, so the same sale cannot read three different ways. -->
         <SalesReceipt :receipt="receipt" />
@@ -1422,7 +1510,7 @@ const STATUS_BADGE: Record<string, { label: string; class: string }> = {
         <!-- The vendored footer goes sm:flex-row — pin the column at EVERY breakpoint,
              or "Void this sale…" gets crushed beside the full-width New sale button. -->
         <DialogFooter class="flex-col gap-1 sm:flex-col sm:justify-start">
-          <Button class="h-11 w-full text-base font-bold" @click="newSale">New sale</Button>
+          <Button class="h-13 w-full text-base font-bold" @click="newSale">New sale</Button>
           <button
             v-if="receipt.status === 'COMPLETED'"
             type="button"

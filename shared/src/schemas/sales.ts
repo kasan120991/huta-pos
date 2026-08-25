@@ -417,6 +417,19 @@ export interface SalesDayTotals {
   readonly grossCents: number
   readonly refundsCents: number
   readonly netCents: number
+  /**
+   * Money taken per hour of that business day — 24 entries, index 0 = midnight, cut in the
+   * reporting timezone like everything else here.
+   *
+   * GROSS only, deliberately: a refund belongs to the hour the money went back, which is
+   * usually a different day entirely, and a bar that dipped negative would be reading a
+   * different question from the one the shape answers ("when were we busy?").
+   *
+   * Computed server-side because the day figures beside it are — the sales list is PAGED, so
+   * a shape derived from the visible rows would be drawn from a fraction of the day while the
+   * total next to it stated the whole of it.
+   */
+  readonly hours: readonly number[]
 }
 
 export interface SalesTotals {

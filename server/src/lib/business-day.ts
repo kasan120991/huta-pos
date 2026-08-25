@@ -80,6 +80,25 @@ export function dayKey(at: Date, timeZone: string): string {
 }
 
 /**
+ * The hour of the business day, 0–23, local to `timeZone`.
+ *
+ * Lives here rather than beside its one caller for the same reason everything else in this
+ * file does: `at.getHours()` reads the SERVER's zone, which is the exact bug this module was
+ * extracted to stop. A sale rung at 21:16 Eastern is hour 21 of that store's day, never
+ * hour 1 of the next one.
+ */
+export function hourKey(at: Date, timeZone: string): number {
+  const hour = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    hour: '2-digit',
+  }).format(at)
+  // `hour12: false` yields 24 at midnight in some ICU builds — the same wrinkle
+  // `zoneOffsetMs` guards against above.
+  return Number(hour) % 24
+}
+
+/**
  * A half-open instant range for a span of business days, or undefined when unfiltered.
  *
  * HALF-OPEN, deliberately: `[from 00:00, to+1 day 00:00)`. `to` names a whole business day,

@@ -10,7 +10,7 @@ import { assertCan } from '../auth/permissions.js'
 import type { Principal } from '../auth/principal.js'
 import { resolveMoneyStores } from '../auth/store-scope.js'
 import { prisma } from '../db/client.js'
-import { dayKey, dayRange, scopeTimezone } from '../lib/business-day.js'
+import { dayKey, dayRange, hourKey, scopeTimezone } from '../lib/business-day.js'
 import { NotFoundError } from '../errors/index.js'
 import type { Prisma } from '../generated/prisma/client.js'
 
@@ -247,12 +247,15 @@ async function dayTotals(
     select: { createdAt: true, amountCents: true },
   })
 
-  const byDay = new Map<string, { saleCount: number, grossCents: number, refundsCents: number }>()
+  const byDay = new Map<
+    string,
+    { saleCount: number, grossCents: number, refundsCents: number, hours: number[] }
+  >()
   const bucket = (at: Date) => {
     const key = dayKey(at, timeZone)
     let row = byDay.get(key)
     if (!row) {
-      row = { saleCount: 0, grossCents: 0, refundsCents: 0 }
+      row = { saleCount: 0, grossCents: 0, refundsCents: 0, hours: Array<number>(24).fill(0) }
       byDay.set(key, row)
     }
     return row
@@ -261,7 +264,12 @@ async function dayTotals(
   for (const sale of sales) {
     const row = bucket(sale.createdAt)
     row.saleCount += 1
-    row.grossCents += sale.payments.reduce((sum, p) => sum + p.amountCents, 0)
+    const taken = sale.payments.reduce((sum, p) => sum + p.amountCents, 0)
+    row.grossCents += taken
+    // Free: the same rows are already in hand for the day figure, so the shape costs no
+    // extra query — only one more key.
+    const hour = hourKey(sale.createdAt, timeZone)
+    row.hours[hour] = (row.hours[hour] ?? 0) + taken
   }
   // Refunds bucket by their OWN date, so a day can legitimately show money out against no
   // sale of its own — see the warning on salesTotals.
@@ -274,6 +282,7 @@ async function dayTotals(
       grossCents: row.grossCents,
       refundsCents: row.refundsCents,
       netCents: row.grossCents - row.refundsCents,
+      hours: row.hours,
     }))
     .sort((a, b) => (a.day < b.day ? 1 : -1))
 }

@@ -457,6 +457,50 @@ describe('filters and paging', () => {
     expect(totals.days.map((d) => d.day)).toContain('2026-08-20')
   })
 
+  it('buckets takings by HOUR of the store day, not the server clock', async () => {
+    const variant = await eachProduct(storeA.id)
+    const sale = await cashSale(staffA, variant.id)
+
+    // Kiritimati is UTC+14 — a zone the test runner cannot be in, so this can only pass for
+    // the right reason. 08:30 UTC is 22:30 the SAME calendar day there, i.e. hour 22.
+    await prisma.store.update({
+      where: { id: storeA.id },
+      data: { timezone: 'Pacific/Kiritimati' },
+    })
+    await prisma.sale.update({
+      where: { id: sale.id },
+      data: { createdAt: new Date('2026-08-20T08:30:00.000Z') },
+    })
+
+    const totals = await salesTotals(admin, { storeId: storeA.id })
+    const day = totals.days.find((d) => d.day === '2026-08-20')
+    expect(day).toBeDefined()
+    expect(day?.hours).toHaveLength(24)
+    expect(day?.hours[22]).toBeGreaterThan(0)
+    // Every other hour is silent, and the bars must sum to the day's gross or the shape is
+    // describing a different figure from the total printed beside it.
+    expect(day?.hours.reduce((a, b) => a + b, 0)).toBe(day?.grossCents)
+  })
+
+  it('reads the same instant into a different hour under a different store zone', async () => {
+    const variant = await eachProduct(storeA.id)
+    const sale = await cashSale(staffA, variant.id)
+    await prisma.sale.update({
+      where: { id: sale.id },
+      data: { createdAt: new Date('2026-08-20T08:30:00.000Z') },
+    })
+
+    // Honolulu is UTC−10: the same instant is 22:30 on the 19th there, so both the day and
+    // the hour move. One instant, two answers — which no server-zone implementation gives.
+    await prisma.store.update({
+      where: { id: storeA.id },
+      data: { timezone: 'Pacific/Honolulu' },
+    })
+    const totals = await salesTotals(admin, { storeId: storeA.id })
+    const day = totals.days.find((d) => d.day === '2026-08-19')
+    expect(day?.hours[22]).toBeGreaterThan(0)
+  })
+
   it('offers cashier options that do not collapse when a cashier is picked', async () => {
     const variant = await eachProduct(storeA.id)
     await cashSale(staffA, variant.id)

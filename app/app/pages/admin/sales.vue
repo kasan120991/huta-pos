@@ -252,6 +252,8 @@ interface DayGroup {
   readonly grossCents: number
   readonly refundsCents: number
   readonly netCents: number
+  /** Gross taken per hour of the business day, 24 entries. Empty when totals have not landed. */
+  readonly hours: readonly number[]
   readonly rows: SaleHistoryRow[]
 }
 
@@ -289,10 +291,75 @@ const groups = computed<DayGroup[]>(() => {
       grossCents: totalsForDay?.grossCents ?? 0,
       refundsCents: totalsForDay?.refundsCents ?? 0,
       netCents: totalsForDay?.netCents ?? 0,
+      // Server-side, like the figures beside them: the list is paged, so a shape derived
+      // from the visible rows would be a fraction of the day under a total that is not.
+      hours: totalsForDay?.hours ?? [],
       rows: dayRows,
     }
   })
 })
+
+/**
+ * Average sale over the filtered range.
+ *
+ * Null rather than 0 when nothing was rung — the suppliers-scorecard rule that an average
+ * with no sample is not a figure — and it renders with its sample size, because an average
+ * over 3 sales and one over 300 are different claims a bare number cannot separate.
+ */
+const averageSaleCents = computed(() => {
+  const t = totals.value
+  if (!t || t.saleCount === 0) return null
+  return Math.round(t.grossCents / t.saleCount)
+})
+
+/**
+ * The hours the sparklines span, shared by EVERY day on screen.
+ *
+ * Per-day trimming would give each day its own x-axis, so a quiet morning and a busy one
+ * would draw the same shape and the two could not be compared — which is the only thing a
+ * row of sparklines is for. One window, computed across the visible days, from the first
+ * hour anything was taken to the last.
+ */
+const sparkWindow = computed(() => {
+  let first = 24
+  let last = -1
+  for (const group of groups.value) {
+    group.hours.forEach((cents, hour) => {
+      if (cents <= 0) return
+      if (hour < first) first = hour
+      if (hour > last) last = hour
+    })
+  }
+  if (last < first) return null
+  // A single trading hour would render as one fat bar; widen it so the shape reads as a day.
+  if (last - first < 3) {
+    first = Math.max(0, first - 1)
+    last = Math.min(23, last + 2)
+  }
+  return { first, last }
+})
+
+/** The tallest hour anywhere on screen — the scale every sparkline is drawn against. */
+const sparkPeak = computed(() => {
+  let peak = 0
+  for (const group of groups.value) {
+    for (const cents of group.hours) if (cents > peak) peak = cents
+  }
+  return peak
+})
+
+function sparkBars(hours: readonly number[]): Array<{ hour: number, pct: number }> {
+  const win = sparkWindow.value
+  if (!win || sparkPeak.value <= 0) return []
+  const out: Array<{ hour: number, pct: number }> = []
+  for (let hour = win.first; hour <= win.last; hour += 1) {
+    out.push({ hour, pct: Math.round(((hours[hour] ?? 0) / sparkPeak.value) * 100) })
+  }
+  return out
+}
+
+const hourLabel = (hour: number) =>
+  hour === 0 ? '12am' : hour === 12 ? '12pm' : hour > 12 ? `${hour - 12}pm` : `${hour}am`
 
 const showingLabel = computed(() => {
   const d = pageData.value
@@ -458,33 +525,42 @@ const netOf = (row: SaleHistoryRow) => row.totalCents - row.refundedCents
 
     <!-- totals: the SAME filters as the table below, never a different scope -->
     <div v-if="totals" class="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
+      <!-- Net leads, with the two figures it is made of underneath it rather than as tiles
+           of their own — gross and refunds are how you check the number, not the number. -->
       <div class="rounded-xl border bg-card px-3.5 py-2.5">
-        <div class="text-lg font-bold tabular-nums">{{ totals.saleCount }}</div>
-        <div class="text-xs text-muted-foreground">
-          Sales<template v-if="totals.voidedCount > 0"> · {{ totals.voidedCount }} voided</template>
+        <div class="text-lg font-bold tabular-nums text-primary">{{ fmt(totals.netCents) }}</div>
+        <div class="text-xs text-muted-foreground">Net taken</div>
+        <div class="mt-0.5 text-[11px] text-muted-foreground">
+          {{ fmt(totals.grossCents) }} gross<template v-if="totals.refundsCents > 0">
+            · <span class="text-destructive">−{{ fmt(totals.refundsCents) }}</span> back</template>
         </div>
       </div>
       <div class="rounded-xl border bg-card px-3.5 py-2.5">
-        <div class="text-lg font-bold tabular-nums">{{ fmt(totals.grossCents) }}</div>
-        <div class="text-xs text-muted-foreground">Gross</div>
+        <div class="text-lg font-bold tabular-nums">{{ totals.saleCount }}</div>
+        <div class="text-xs text-muted-foreground">Sales</div>
+        <div class="mt-0.5 text-[11px] text-muted-foreground">
+          <template v-if="totals.voidedCount > 0">{{ totals.voidedCount }} voided</template>
+          <template v-else>none voided</template>
+        </div>
+      </div>
+      <div class="rounded-xl border bg-card px-3.5 py-2.5">
+        <!-- An average travels with its sample size, and is an em dash rather than $0.00
+             when there is nothing to average. -->
+        <div class="text-lg font-bold tabular-nums">
+          {{ averageSaleCents === null ? '—' : fmt(averageSaleCents) }}
+        </div>
+        <div class="text-xs text-muted-foreground">Average sale</div>
+        <div class="mt-0.5 text-[11px] text-muted-foreground">
+          <template v-if="averageSaleCents !== null">over {{ totals.saleCount }}</template>
+        </div>
       </div>
       <div class="rounded-xl border bg-card px-3.5 py-2.5">
         <div class="text-lg font-bold tabular-nums">{{ fmt(totals.cashCents) }}</div>
         <div class="text-xs text-muted-foreground">Cash</div>
       </div>
       <div class="rounded-xl border bg-card px-3.5 py-2.5">
-        <!-- "−$0.00" reads like a rounding artefact; nothing went out is just $0.00. -->
-        <div
-          class="text-lg font-bold tabular-nums"
-          :class="totals.refundsCents > 0 ? 'text-destructive' : ''"
-        >
-          <template v-if="totals.refundsCents > 0">−</template>{{ fmt(totals.refundsCents) }}
-        </div>
-        <div class="text-xs text-muted-foreground">Refunds out</div>
-      </div>
-      <div class="rounded-xl border bg-card px-3.5 py-2.5">
-        <div class="text-lg font-bold tabular-nums text-primary">{{ fmt(totals.netCents) }}</div>
-        <div class="text-xs text-muted-foreground">Net</div>
+        <div class="text-lg font-bold tabular-nums">{{ fmt(totals.cardCents) }}</div>
+        <div class="text-xs text-muted-foreground">Card</div>
       </div>
     </div>
 
@@ -499,26 +575,46 @@ const netOf = (row: SaleHistoryRow) => row.totalCents - row.refundedCents
             <TableHead scope="col">Store</TableHead>
             <TableHead scope="col">Cashier</TableHead>
             <TableHead scope="col">Method</TableHead>
-            <TableHead scope="col">Status</TableHead>
             <TableHead scope="col" class="text-right">Total</TableHead>
-            <TableHead scope="col" class="text-right">Refunded</TableHead>
-            <TableHead scope="col" class="text-right">Net</TableHead>
+            <TableHead scope="col">Status</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           <template v-for="group in groups" :key="group.day">
             <!-- The day subtotal bar. Not a TableRow's hover target — it is a heading. -->
             <TableRow class="bg-accent/40 text-xs font-bold uppercase tracking-wider text-muted-foreground hover:bg-accent/40">
-              <TableCell colspan="6" class="py-1.5">
+              <TableCell colspan="4" class="py-1.5">
                 {{ group.label }} · {{ group.saleCount }}
                 {{ group.saleCount === 1 ? 'sale' : 'sales' }}
               </TableCell>
-              <TableCell class="py-1.5 text-right tabular-nums">{{ fmt(group.grossCents) }}</TableCell>
-              <TableCell class="py-1.5 text-right tabular-nums">
-                <template v-if="group.refundsCents > 0">−{{ fmt(group.refundsCents) }}</template>
-                <template v-else>—</template>
+              <!--
+                When the day was busy. Every sparkline on screen shares one window and one
+                peak, so two days can actually be compared — a per-day scale would draw a
+                quiet morning and a heaving one identically.
+              -->
+              <TableCell class="py-1.5">
+                <div
+                  v-if="sparkBars(group.hours).length"
+                  class="flex h-5 items-end gap-px"
+                  role="img"
+                  :aria-label="`Takings by hour on ${group.label}`"
+                >
+                  <span
+                    v-for="bar in sparkBars(group.hours)"
+                    :key="bar.hour"
+                    class="min-h-px w-1 rounded-t-[1px] bg-primary/55"
+                    :style="{ height: `${Math.max(bar.pct, bar.pct > 0 ? 8 : 0)}%` }"
+                    :title="`${hourLabel(bar.hour)} · ${fmt(group.hours[bar.hour] ?? 0)}`"
+                  />
+                </div>
               </TableCell>
-              <TableCell class="py-1.5 text-right tabular-nums">{{ fmt(group.netCents) }}</TableCell>
+              <TableCell class="py-1.5 text-right tabular-nums text-foreground">
+                {{ fmt(group.netCents) }}
+                <span v-if="group.refundsCents > 0" class="ml-1 font-normal text-destructive">
+                  −{{ fmt(group.refundsCents) }}
+                </span>
+              </TableCell>
+              <TableCell class="py-1.5" />
             </TableRow>
 
             <TableRow
@@ -550,6 +646,19 @@ const netOf = (row: SaleHistoryRow) => row.totalCents - row.refundedCents
                   {{ pm === 'CASH' ? 'Cash' : 'Card' }}
                 </span>
               </TableCell>
+              <!--
+                One money column, not three. Refunded and Net were empty on nine rows in ten,
+                so they cost width on every row to serve the rare one; a refunded sale now
+                strikes its original and states what it kept, which makes the exception the
+                loud thing instead of the column heading.
+              -->
+              <TableCell class="text-right tabular-nums">
+                <template v-if="row.refundedCents > 0">
+                  <span class="text-xs text-muted-foreground line-through">{{ fmt(row.totalCents) }}</span>
+                  <span class="ml-1.5 font-medium">{{ fmt(netOf(row)) }}</span>
+                </template>
+                <template v-else>{{ fmt(row.totalCents) }}</template>
+              </TableCell>
               <TableCell>
                 <span
                   v-if="STATUS_BADGE[row.status]"
@@ -559,18 +668,10 @@ const netOf = (row: SaleHistoryRow) => row.totalCents - row.refundedCents
                   {{ STATUS_BADGE[row.status]!.label }}
                 </span>
               </TableCell>
-              <TableCell class="text-right tabular-nums">{{ fmt(row.totalCents) }}</TableCell>
-              <TableCell class="text-right tabular-nums">
-                <span v-if="row.refundedCents > 0" class="text-destructive">
-                  −{{ fmt(row.refundedCents) }}
-                </span>
-                <span v-else class="text-muted-foreground">—</span>
-              </TableCell>
-              <TableCell class="text-right font-medium tabular-nums">{{ fmt(netOf(row)) }}</TableCell>
             </TableRow>
           </template>
 
-          <TableEmpty v-if="!groups.length && !loading" :colspan="9" class="text-muted-foreground">
+          <TableEmpty v-if="!groups.length && !loading" :colspan="7" class="text-muted-foreground">
             {{ searchingNumber ? 'No sale with that number.' : 'Nothing rung in this range.' }}
           </TableEmpty>
         </TableBody>
