@@ -60,6 +60,12 @@ export interface CatalogVariant {
   readonly maxSaleBase: number | null
   /** Present only for a principal that may see cost. */
   readonly costCents?: number | null
+  /**
+   * LIST payloads only. The variant's OWN supplier, which overrides the product's when set —
+   * so the effective supplier is `supplierId ?? product.primarySupplier?.id`. Detail payloads
+   * omit it and answer through `identity.supplier` instead, already resolved.
+   */
+  readonly supplierId?: string | null
   readonly priceGroup: CatalogPriceGroup | null
   readonly stockLevels: readonly CatalogStockLevel[]
   /** Resolved against the in-scope stores. See VariantStock. */

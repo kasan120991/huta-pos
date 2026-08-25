@@ -440,6 +440,86 @@ export async function cancelOrder(
 }
 
 /**
+ * Delete a draft outright — discarded, or never placed at all.
+ *
+ * The append-only rule this bends, and why it holds anyway: the house rules forbid deleting a sale,
+ * payment, refund or inventory movement, because those are the audit trail. A draft that was
+ * never placed is none of those — it has no number, it was never sent to anyone, no stock
+ * moved, and nothing can reference it. Leaving it in the list is just litter in a queue that
+ * is supposed to be work.
+ *
+ * Accepts DRAFT as well as CANCELLED so discarding is ONE step rather than cancel-then-delete:
+ * a tombstone for something nobody ever saw is the litter, not the cure. Kasan's call,
+ * 2026-08-24.
+ *
+ * ⚠️ Two guards, and both are load-bearing:
+ *
+ *  * **`number` must be NULL.** A cancelled order that WAS placed burned a per-store number,
+ *    and the sequence is something a person reconciles against. Deleting it punches a hole in
+ *    that sequence with no record of what filled it — which is precisely why numbering happens
+ *    at placement and not at creation.
+ *  * **No receipts.** `Receipt.purchaseOrderId` is `ON DELETE SET NULL`, so the database would
+ *    silently DETACH a delivery rather than refuse the delete. A draft cannot have receipts,
+ *    so this can only fire if something is already wrong — which is exactly when a silent
+ *    detach would be worst.
+ *
+ * The `PurchaseOrderLine` rows go with it by cascade. The AuditLog row is written FIRST and
+ * deliberately carries the whole order in `before`: once the row is gone, the log is the only
+ * evidence it ever existed.
+ */
+export async function deleteCancelledDraft(principal: Principal, id: string): Promise<void> {
+  const order = await prisma.purchaseOrder.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      number: true,
+      status: true,
+      storeId: true,
+      supplierId: true,
+      notes: true,
+      createdAt: true,
+      _count: { select: { receipts: true } },
+      lines: { select: { variantId: true, quantityBase: true } },
+    },
+  })
+  if (!order) throw new NotFoundError('That purchase order does not exist.')
+
+  if (
+    order.status !== PurchaseOrderStatus.DRAFT &&
+    order.status !== PurchaseOrderStatus.CANCELLED
+  ) {
+    throw new ConflictError('Only a draft can be deleted.')
+  }
+  if (order.number !== null) {
+    throw new ConflictError(
+      'That order was placed, so it keeps its number and stays on the record. Only a draft discarded before it was placed can be deleted.',
+    )
+  }
+  if (order._count.receipts > 0) {
+    throw new ConflictError('That order has deliveries against it and cannot be deleted.')
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: principal.userId,
+      action: 'purchaseOrder.delete',
+      entityType: 'PurchaseOrder',
+      entityId: order.id,
+      before: {
+        storeId: order.storeId,
+        supplierId: order.supplierId,
+        notes: order.notes,
+        createdAt: order.createdAt.toISOString(),
+        lines: order.lines.map((l) => ({ variantId: l.variantId, quantityBase: l.quantityBase })),
+      },
+      after: {},
+    },
+  })
+
+  await prisma.purchaseOrder.delete({ where: { id } })
+}
+
+/**
  * Close an order that never filled.
  *
  * This is the ONE place a shortfall becomes a variance. While an order is open, a short

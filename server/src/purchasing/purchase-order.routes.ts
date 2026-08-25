@@ -13,6 +13,7 @@ import {
 } from '../middleware/validate.js'
 import {
   cancelOrder,
+  deleteCancelledDraft,
   closeShort,
   createOrder,
   getOrder,
@@ -124,6 +125,24 @@ purchaseOrderRouter.post(
     if (principal.userId === null) throw new ForbiddenError('Placing an order needs an acting user.')
 
     res.json(await placeOrder(principal, req.params['id'] as string, principal.userId))
+  },
+)
+
+/**
+ * Delete a draft that was discarded before it was ever placed.
+ *
+ * The only DELETE in the purchasing surface, and narrow on purpose — the service refuses
+ * anything that carries a number or a delivery. 204, because there is nothing left to return.
+ */
+purchaseOrderRouter.delete(
+  '/:id',
+  requireAdmin,
+  validateParams(idParam),
+  async (req, res) => {
+    const principal = requirePrincipal(req)
+    assertCan(principal, 'purchaseOrder.manage')
+    await deleteCancelledDraft(principal, req.params['id'] as string)
+    res.status(204).end()
   },
 )
 

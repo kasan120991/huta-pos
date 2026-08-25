@@ -193,6 +193,15 @@ function variantSelect(principal: Principal, detail = false) {
           },
         }
       : {}),
+    // `?supplierId=` matches a supplier named on the product OR any variant, but every active
+    // variant ships regardless — so without this a shelf whose variants come from two
+    // distributors gives no way to tell which is whose. One FK, not the potency join the
+    // docblock above rules out. Selected unconditionally because a conditional branch here
+    // makes the whole select a union and the detail path loses its strain scalars; the DETAIL
+    // mapper drops it instead, beside the other raw columns, since there the resolved
+    // `identity.supplier` is the answer and a raw column beside it would be the un-inherited
+    // null.
+    supplierId: true,
     // The ONE place cost is decided. Everything downstream simply never receives it.
     ...(canSeeCost(principal) ? { costCents: true } : {}),
     priceGroup: {
@@ -498,7 +507,7 @@ export async function getProduct(principal: Principal, id: string, storeId?: str
      * value, which is the bug this whole module exists to prevent.
      */
     variants: shaped.variants.map((v) => {
-      const { strainType, terpeneProfile, nose, coaUrl, description, cannabinoids, supplier, ...rest } =
+      const { strainType, terpeneProfile, nose, coaUrl, description, cannabinoids, supplier, supplierId: _rawSupplierId, ...rest } =
         v as typeof v & {
           strainType?: string | null
           terpeneProfile?: string | null

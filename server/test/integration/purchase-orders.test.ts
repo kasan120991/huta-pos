@@ -7,6 +7,7 @@ import {
   cancelOrder,
   closeShort,
   createOrder,
+  deleteCancelledDraft,
   getOrder,
   listOrders,
   placeOrder,
@@ -212,6 +213,50 @@ describe('lifecycle', () => {
     expect(cancelled.number).toBeNull()
     expect(cancelled.reference).toBe('Draft')
     expect(cancelled.cancelledAt).not.toBeNull()
+  })
+
+  it('deletes a draft outright, lines and all', async () => {
+    const order = await draft()
+    await deleteCancelledDraft(admin, order.id)
+
+    expect(await prisma.purchaseOrder.findUnique({ where: { id: order.id } })).toBeNull()
+    // The cascade is the database's, not ours — assert it actually fired.
+    expect(await prisma.purchaseOrderLine.count({ where: { purchaseOrderId: order.id } })).toBe(0)
+  })
+
+  it('deletes a draft that was already cancelled', async () => {
+    const order = await draft()
+    await cancelOrder(admin, order.id)
+    await deleteCancelledDraft(admin, order.id)
+
+    expect(await prisma.purchaseOrder.findUnique({ where: { id: order.id } })).toBeNull()
+  })
+
+  it('REFUSES to delete a cancelled order that was placed, so the number sequence keeps no gaps', async () => {
+    // The guard that matters: a placed order burned a per-store number, and that sequence is
+    // something a person reconciles against. Cancelling does not hand back the number.
+    const order = await placeOrder(admin, (await draft()).id, adminId)
+    await cancelOrder(admin, order.id)
+
+    await expect(deleteCancelledDraft(admin, order.id)).rejects.toMatchObject({ code: 'CONFLICT' })
+    expect(await prisma.purchaseOrder.findUnique({ where: { id: order.id } })).not.toBeNull()
+  })
+
+  it('refuses to delete a placed order that is still open', async () => {
+    const order = await placeOrder(admin, (await draft()).id, adminId)
+    await expect(deleteCancelledDraft(admin, order.id)).rejects.toMatchObject({ code: 'CONFLICT' })
+  })
+
+  it('writes the deleted draft into the audit log, since the row itself is gone', async () => {
+    const order = await draft()
+    await deleteCancelledDraft(admin, order.id)
+
+    const entry = await prisma.auditLog.findFirst({
+      where: { entityType: 'PurchaseOrder', entityId: order.id, action: 'purchaseOrder.delete' },
+    })
+    expect(entry).not.toBeNull()
+    // The log is the ONLY evidence it existed, so it has to carry the lines.
+    expect((entry?.before as { lines?: unknown[] }).lines).toHaveLength(order.lines.length)
   })
 
   it('refuses to cancel a closed order', async () => {
