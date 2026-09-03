@@ -40,5 +40,5 @@ app/.certs/
 # .claude/settings.json would be tracked; this one is per-machine.
 .claude/settings.local.json
 
-# Left untracked at Kasan's request, 2026-08-22.
-the house rules
+# Local architecture notes. Left untracked deliberately.
+CLAUDE.md
