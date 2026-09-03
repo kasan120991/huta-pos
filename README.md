@@ -174,12 +174,4 @@ employee scheduling — the timeclock records what happened, not what will.
 
 ---
 
-## Where the detail lives
-
-⚠️ The architecture source of truth is **`the house rules`, which is deliberately untracked** and
-exists only on the maintainer's machine. It carries the reasoning behind every decision
-above, plus the ones this file only summarises. This README is the whole of the orientation
-that ships with the repo — if you are picking this up from a clone alone, expect to read the
-code for the *why*.
-
 Private repository. All rights reserved; no licence is granted.
