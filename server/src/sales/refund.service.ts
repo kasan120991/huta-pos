@@ -296,7 +296,9 @@ export async function refundSale(
   const receipt = await getRefund(created.refundId, created.saleNumber)
 
   // After commit, never throwing.
-  emitToAdmin({
+  // BOTH rooms — see the note on `sale.completed`. A refund moves the same drawer figures a
+  // sale does, so a register that hears one must hear the other.
+  const refunded = {
     name: 'sale.refunded',
     payload: {
       saleId,
@@ -306,10 +308,10 @@ export async function refundSale(
       method: input.method,
       cardRefundFailed: !settled,
     },
-  })
-  for (const l of created.restocked) {
-    emitToStore(storeId, { name: 'stock.changed', payload: { storeId, variantId: l.variantId } })
-  }
+  } as const
+  emitToAdmin(refunded)
+  emitToStore(storeId, refunded)
+  // Restock `stock.changed` events come from `applyMovement` via the request scope.
 
   return receipt
 }
@@ -500,20 +502,20 @@ export async function voidSale(
 
   const settled = created.cardRefundId ? await settleCardRefund(created.cardRefundId) : true
 
-  emitToAdmin({
+  const voided = {
     name: 'sale.refunded',
     payload: {
       saleId,
       storeId,
       number: created.saleNumber,
       amountCents: created.totalCents,
-      method: created.cardRefundId ? 'CARD' : 'CASH',
+      method: created.cardRefundId ? 'CARD' : ('CASH' as const),
       cardRefundFailed: !settled,
     },
-  })
-  for (const variantId of created.variantIds) {
-    emitToStore(storeId, { name: 'stock.changed', payload: { storeId, variantId } })
-  }
+  } as const
+  emitToAdmin(voided)
+  emitToStore(storeId, voided)
+  // Restock `stock.changed` events come from `applyMovement` via the request scope.
 
   return getSale(principal, saleId)
 }

@@ -8,6 +8,8 @@ import { FieldError } from '~/components/ui/field'
 import { ToggleGroup, ToggleGroupItem } from '~/components/ui/toggle-group'
 import { Button } from '~/components/ui/button'
 import { ApiError, apiFetch } from '~/composables/useApi'
+import { SALE_EVENTS, useLiveData } from '~/composables/useLiveData'
+import LiveUpdatesNotice from '~/components/LiveUpdatesNotice.vue'
 import { STATUS_BADGE, money as fmt, saleNumber } from '~/lib/sale-format'
 import { useAuthStore } from '~/stores/auth'
 
@@ -116,24 +118,48 @@ const query = computed(() => {
 
 const searching = computed(() => /^\d+$/.test(term.value.trim()) && term.value.trim() !== '')
 
-async function load() {
+async function load(options: { silent?: boolean } = {}) {
   if (!booted.value && !storeId.value) return
-  loadingRows.value = true
-  listError.value = null
+  const silent = options.silent === true
+  if (!silent) {
+    loadingRows.value = true
+    listError.value = null
+  }
   try {
-    const [page, sums] = await Promise.all([
+    const [page] = await Promise.all([
       apiFetch<SalesPage>('/sales', { query: { ...query.value, pageSize: 50 } }),
-      apiFetch<SalesTotals>('/sales/totals', { query: query.value }),
+      fetchTotals(),
     ])
     rows.value = [...page.sales]
-    totals.value = sums
-    if (!rows.value.some((r) => r.id === detail.value?.id)) detail.value = null
+    // ⚠️ Only on a refresh the user asked for. A background refetch that drops the selected
+    // sale off a 50-row page would otherwise CLOSE the receipt someone is reading mid-look.
+    if (!silent && !rows.value.some((r) => r.id === detail.value?.id)) detail.value = null
   } catch (err) {
-    listError.value = err instanceof ApiError ? err.message : 'Could not load the history.'
+    if (!silent) listError.value = err instanceof ApiError ? err.message : 'Could not load the history.'
+    throw err
   } finally {
-    loadingRows.value = false
+    if (!silent) loadingRows.value = false
   }
 }
+
+/** The day's money strip. Fixed positions, so it refreshes silently. */
+async function fetchTotals() {
+  totals.value = await apiFetch<SalesTotals>('/sales/totals', { query: query.value })
+}
+
+/**
+ * Live updates, Kasan's Option B (2026-09-03): **quiet for figures, held for rows.**
+ *
+ * The money strip follows the till live. The list is held: a sale rung at the counter
+ * inserts at the top, and this screen is a master–detail where the row someone just tapped
+ * would shift out from under their finger.
+ */
+useLiveData(SALE_EVENTS, fetchTotals)
+const { pending: pendingRows, apply: applyRows } = useLiveData(
+  SALE_EVENTS,
+  () => load({ silent: true }),
+  { defer: true },
+)
 
 /* ————— the selected sale ————— */
 
@@ -215,6 +241,12 @@ function handOff(saleId: string) {
         <div class="flex min-h-0 flex-1">
           <!-- ————— the list ————— -->
           <div class="flex w-[360px] shrink-0 flex-col border-r p-4">
+            <LiveUpdatesNotice
+              :count="pendingRows"
+              size="touch"
+              class="mb-3"
+              @apply="applyRows"
+            />
             <div class="relative mb-3">
               <Search class="pointer-events-none absolute left-3 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
               <SearchInput

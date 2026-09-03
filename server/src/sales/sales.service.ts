@@ -414,7 +414,10 @@ export async function checkout(principal: Principal, input: CheckoutInput): Prom
 
   // After commit, never throwing — announcing a sale a rollback erased would be worse
   // than announcing nothing.
-  emitToAdmin({
+  // BOTH rooms. This was `emitToAdmin` alone until 2026-09-03, which meant a register could
+  // not learn that the till beside it had rung a sale — every cashier's socket lives in the
+  // store room, so the shift dashboard and the sale list had no event to listen for.
+  const completed = {
     name: 'sale.completed',
     payload: {
       saleId,
@@ -423,10 +426,11 @@ export async function checkout(principal: Principal, input: CheckoutInput): Prom
       number: receipt.number,
       totalCents: receipt.totalCents,
     },
-  })
-  for (const variantId of new Set(receipt.lines.map((l) => l.variantId))) {
-    emitToStore(storeId, { name: 'stock.changed', payload: { storeId, variantId } })
-  }
+  } as const
+  emitToAdmin(completed)
+  emitToStore(storeId, completed)
+  // `stock.changed` is NOT emitted here any more — `applyMovement` records it and the
+  // request scope flushes it. See realtime/stock-events.ts.
 
   return receipt
 }

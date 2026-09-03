@@ -38,6 +38,7 @@ import {
 } from '~/components/ui/dialog'
 import { Input } from '~/components/ui/input'
 import { ApiError, apiFetch } from '~/composables/useApi'
+import { STOCK_EVENTS, useLiveData } from '~/composables/useLiveData'
 import { getStripe, paymentsConfig } from '~/composables/useStripe'
 import { useTimeclock } from '~/composables/useTimeclock'
 import { useAuthStore } from '~/stores/auth'
@@ -176,32 +177,40 @@ function toCards(products: readonly CatalogProduct[]): Card[] {
 /** Selling view: in-stock only by default — an Out card is a dead tap at the counter. */
 const showAll = ref(false)
 
+/** The browse read and its variant-level filter. No veil, no cart side-effect. */
+async function readBrowse(): Promise<{ products: CatalogProduct[], cards: Card[] }> {
+  const q = term.value.trim()
+  const page = await apiFetch<CatalogPage>('/catalog/products', {
+    query: {
+      ...(q.length >= 2 ? { search: q } : {}),
+      ...(categoryId.value ? { categories: [categoryId.value] } : {}),
+      ...(auth.terminal ? { storeId: auth.terminal.store.id } : {}),
+      // A SCAN bypasses the stock filter — a barcode must always resolve, and the
+      // oversell guard is what protects checkout, not the browse grid.
+      ...(showAll.value || looksScanned(q) ? {} : { stock: 'on-hand' }),
+      page: 1,
+      pageSize: 24,
+    },
+  })
+  const products = page.products as CatalogProduct[]
+  // The server's stock filter is PRODUCT-level; the grid is variant cards, so an Out
+  // variant of an otherwise-stocked product would still slip through without this.
+  const all = toCards(products)
+  return {
+    products,
+    cards: showAll.value || looksScanned(q) ? all : all.filter((c) => c.stockStatus !== 'OUT'),
+  }
+}
+
 async function loadProducts() {
   loadingProducts.value = true
   try {
-    const q = term.value.trim()
-    const page = await apiFetch<CatalogPage>('/catalog/products', {
-      query: {
-        ...(q.length >= 2 ? { search: q } : {}),
-        ...(categoryId.value ? { categories: [categoryId.value] } : {}),
-        ...(auth.terminal ? { storeId: auth.terminal.store.id } : {}),
-        // A SCAN bypasses the stock filter — a barcode must always resolve, and the
-        // oversell guard is what protects checkout, not the browse grid.
-        ...(showAll.value || looksScanned(q) ? {} : { stock: 'on-hand' }),
-        page: 1,
-        pageSize: 24,
-      },
-    })
-    const products = page.products as CatalogProduct[]
-    // The server's stock filter is PRODUCT-level; the grid is variant cards, so an Out
-    // variant of an otherwise-stocked product would still slip through without this.
-    const all = toCards(products)
-    cards.value =
-      showAll.value || looksScanned(q) ? all : all.filter((c) => c.stockStatus !== 'OUT')
+    const { products, cards: next } = await readBrowse()
+    cards.value = next
 
     // A scan yields exactly one variant — add it straight to the cart.
     const flat = products.flatMap((p) => p.variants.map((v) => ({ product: p, variant: v })))
-    if (flat.length === 1 && looksScanned(q)) {
+    if (flat.length === 1 && looksScanned(term.value.trim())) {
       addToCart(flat[0]!.product, flat[0]!.variant)
       term.value = ''
       await loadProducts()
@@ -210,6 +219,20 @@ async function loadProducts() {
     loadingProducts.value = false
   }
 }
+
+/**
+ * Silent live refresh (Kasan's Option A, 2026-09-03): the browse cards' stock badges follow
+ * the shelf, so the till beside this one selling the last unit greys the card out here.
+ *
+ * ⚠️⚠️ It MUST NOT call `loadProducts()`. That function ADDS TO THE CART when a barcode is
+ * still sitting in the search box and matches exactly one variant — so a stock event
+ * arriving in that window would put a phantom line in someone's sale, charge for it, and
+ * relieve stock for it. The cart is untouched here by construction: this writes `cards`
+ * and nothing else.
+ */
+useLiveData(STOCK_EVENTS, async () => {
+  cards.value = (await readBrowse()).cards
+})
 
 const looksScanned = (q: string) => /^\d{6,}$/.test(q)
 

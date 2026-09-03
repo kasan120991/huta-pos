@@ -48,6 +48,7 @@ import {
   TableRow,
 } from '~/components/ui/table'
 import { ApiError, apiFetch } from '~/composables/useApi'
+import { STOCK_EVENTS, useLiveData } from '~/composables/useLiveData'
 import { useAuthStore } from '~/stores/auth'
 
 const auth = useAuthStore()
@@ -66,8 +67,9 @@ const selectedVariantId = ref<string | null>(null)
 const notFound = ref(false)
 const loading = ref(true)
 
-async function fetchAll() {
-  loading.value = true
+async function fetchAll(options: { silent?: boolean } = {}) {
+  const silent = options.silent === true
+  if (!silent) loading.value = true
   try {
     detail.value = await apiFetch<CatalogProductDetail>(`/catalog/products/${productId.value}`, {
       query: { storeId: storeId.value },
@@ -91,9 +93,20 @@ async function fetchAll() {
     if (error instanceof ApiError && error.status === 404) notFound.value = true
     else throw error
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
+
+/**
+ * Silent live refresh (Kasan's Option A, 2026-09-03): the per-store quantities, the cost
+ * basis, the insights strip and the movement ledger all describe stock, so any movement
+ * touching this product restates them.
+ *
+ * `fetchAll` already preserves `selectedVariantId` unless the variant has gone away, so the
+ * variant a user is inspecting survives the refresh — and the ledger follows that same
+ * selection, which is why both are re-read together.
+ */
+useLiveData(STOCK_EVENTS, () => Promise.all([fetchAll({ silent: true }), fetchMovements()]))
 
 async function fetchMovements() {
   if (!selectedVariantId.value) {
@@ -107,7 +120,7 @@ async function fetchMovements() {
   movements.value = data.movements
 }
 
-watch([productId, storeId], fetchAll, { immediate: true })
+watch([productId, storeId], () => void fetchAll(), { immediate: true })
 watch([selectedVariantId, storeId], fetchMovements, { immediate: true })
 
 function setStore(value: unknown) {

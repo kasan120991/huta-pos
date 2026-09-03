@@ -26,6 +26,8 @@ import {
 import { Input } from '~/components/ui/input'
 import { Switch } from '~/components/ui/switch'
 import { ApiError, apiFetch } from '~/composables/useApi'
+import { SALE_EVENTS, useLiveData } from '~/composables/useLiveData'
+import LiveUpdatesNotice from '~/components/LiveUpdatesNotice.vue'
 import { useAuthStore } from '~/stores/auth'
 
 /**
@@ -82,17 +84,35 @@ const rows = ref<SaleSummaryRow[]>([])
 const loadingRows = ref(false)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 
-async function loadRecent() {
-  loadingRows.value = true
+async function loadRecent(options: { silent?: boolean } = {}) {
+  const silent = options.silent === true
+  if (!silent) loadingRows.value = true
   try {
     const digits = term.value.trim()
     rows.value = await apiFetch<SaleSummaryRow[]>('/sales/recent', {
       query: { ...(/^\d+$/.test(digits) && digits !== '' ? { number: Number(digits) } : {}) },
     })
   } finally {
-    loadingRows.value = false
+    if (!silent) loadingRows.value = false
   }
 }
+
+/**
+ * Live updates, Kasan's Option B (2026-09-03): **held for rows.**
+ *
+ * This page is rows only — there is no figure strip to keep live — so everything waits
+ * behind the notice. Which is right for the surface: the left list is what someone is
+ * picking a sale FROM, and re-ordering it mid-pick is how the wrong sale gets refunded.
+ *
+ * Deliberately the LIST only. The picked sale on the right is never re-read: a refund being
+ * composed here is unsaved work — keyed quantities, restock switches — and a background
+ * refetch that replaced `detail` would silently discard it.
+ */
+const { pending: pendingRows, apply: applyRows } = useLiveData(
+  SALE_EVENTS,
+  () => loadRecent({ silent: true }),
+  { defer: true },
+)
 
 watch(term, () => {
   clearTimeout(searchTimer)
@@ -338,6 +358,7 @@ const lineName = (l: { productName: string; variantLabel: string | null }) =>
       <!-- recent sales -->
       <section class="flex w-[360px] shrink-0 flex-col gap-3 border-r p-4" aria-label="Recent sales">
         <h1 class="text-lg font-extrabold tracking-tight">Return</h1>
+        <LiveUpdatesNotice :count="pendingRows" size="touch" @apply="applyRows" />
         <div class="relative">
           <Search class="pointer-events-none absolute left-3 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
           <SearchInput

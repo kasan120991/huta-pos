@@ -31,6 +31,7 @@ import {
 } from '~/components/ui/table'
 import { ToggleGroup, ToggleGroupItem } from '~/components/ui/toggle-group'
 import { ApiError, apiFetch } from '~/composables/useApi'
+import { SALE_EVENTS, useLiveData } from '~/composables/useLiveData'
 import { MOVEMENT_LABEL, money, varianceView } from '~/lib/sale-format'
 
 /**
@@ -147,24 +148,65 @@ const error = ref<string | null>(null)
  * rows, not thousands, which is what makes reducing client-side the right call here and the
  * wrong one on the sales ledger.
  */
-async function fetchAll() {
-  loading.value = true
-  error.value = null
+/** The drawer ledger. Held behind a notice when it changes live — see below. */
+async function fetchRows() {
+  rows.value = (await apiFetch<ShiftListPage>('/shifts', { query: filters.value })).shifts
+}
+
+/** The live till cards. Fixed positions, so they refresh silently. */
+async function fetchTills() {
+  const live = await apiFetch<{ drawers: LiveDrawerRow[] }>('/shifts/live', {
+    query: { ...(storeId.value ? { storeId: storeId.value } : {}) },
+  })
+  tills.value = live.drawers
+}
+
+async function fetchAll(options: { silent?: boolean } = {}) {
+  const silent = options.silent === true
+  if (!silent) {
+    loading.value = true
+    error.value = null
+  }
   try {
-    const [page, live] = await Promise.all([
-      apiFetch<ShiftListPage>('/shifts', { query: filters.value }),
-      apiFetch<{ drawers: LiveDrawerRow[] }>('/shifts/live', {
-        query: { ...(storeId.value ? { storeId: storeId.value } : {}) },
-      }),
-    ])
-    rows.value = page.shifts
-    tills.value = live.drawers
+    await Promise.all([fetchRows(), fetchTills()])
   } catch (err) {
-    error.value = err instanceof ApiError ? err.message : 'Could not load the drawers.'
+    if (!silent) error.value = err instanceof ApiError ? err.message : 'Could not load the drawers.'
+    throw err
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
+
+/**
+ * Silent live refresh (Kasan's Option A, 2026-09-03): a sale, refund or void anywhere in
+ * scope re-reads this screen in place — no pill, no flash, no tap.
+ *
+ * `silent` is what keeps it silent, and it suppresses two things rather than one: the
+ * loading veil, and the error write. A background refetch that fails must not paint
+ * "Could not load" over a screen that is already showing good data — the user did not ask
+ * for this fetch and cannot act on its failure. `useLiveData` swallows the rejection.
+ */
+/**
+ * Live updates, Kasan's Option B (2026-09-03) — and on this page that resolves to SILENT for
+ * everything, which is worth explaining because the first pass got it wrong.
+ *
+ * Option B holds rows that INSERT or REORDER. A sale does neither here: it restates figures
+ * inside the row of a drawer that is already open and already sorted into the work band
+ * above the `Balanced · N` divider. A row only joins this list when a drawer is OPENED, and
+ * only moves across the divider when one is CLOSED — and neither is a sale event, so neither
+ * arrives this way at all.
+ *
+ * ⚠️ Holding them was actively WRONG, not merely over-cautious: the same drawer appears
+ * twice on this page, as a live till card and as a ledger row. Refreshing one while holding
+ * the other had the card reading "14 sales" directly above a row reading 13 — one drawer
+ * disagreeing with itself on screen. That is the fault that killed the catalog's original
+ * summary strip, and the rule it left behind is that counts may not contradict the rows
+ * beneath them. Reported by Kasan, 2026-09-03.
+ *
+ * The queue chips and the KPI strip are reduced client-side from `rows`, so they move with
+ * it and cannot drift either.
+ */
+useLiveData(SALE_EVENTS, () => Promise.all([fetchTills(), fetchRows()]))
 
 watch([filters], () => void fetchAll(), { deep: true })
 

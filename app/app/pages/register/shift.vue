@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from '~/components/ui/select'
 import { ApiError, apiFetch } from '~/composables/useApi'
+import { SALE_EVENTS, useLiveData } from '~/composables/useLiveData'
 import { MOVEMENT_LABEL, varianceView } from '~/lib/sale-format'
 import { useAuthStore } from '~/stores/auth'
 
@@ -58,6 +59,16 @@ async function fetchShift() {
     movements.value = []
   }
 }
+
+/**
+ * Silent live refresh (Kasan's Option A, 2026-09-03). This is the screen the behaviour was
+ * designed for: the sale count and the cash · card figures tick up as the till rings, and
+ * `fetchShift` sets no veil of its own so there is nothing to flash.
+ *
+ * ⚠️ `sale.completed` reached the ADMIN room only until 2026-09-03, so a register could not
+ * hear about the store it is standing in. Both rooms now.
+ */
+useLiveData(SALE_EVENTS, fetchShift)
 
 onMounted(async () => {
   if (!auth.resolved) await auth.fetchPrincipal()

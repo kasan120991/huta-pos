@@ -19,6 +19,7 @@ import {
 } from '~/components/ui/select'
 import { Switch } from '~/components/ui/switch'
 import { apiFetch } from '~/composables/useApi'
+import { STOCK_EVENTS, useLiveData } from '~/composables/useLiveData'
 import { useAuthStore } from '~/stores/auth'
 
 const auth = useAuthStore()
@@ -102,8 +103,9 @@ async function fetchSummary() {
   })
 }
 
-async function fetchPage() {
-  loading.value = true
+async function fetchPage(options: { silent?: boolean } = {}) {
+  const silent = options.silent === true
+  if (!silent) loading.value = true
   try {
     pageData.value = await apiFetch<CatalogPage>('/catalog/products', {
       query: {
@@ -118,9 +120,23 @@ async function fetchPage() {
       },
     })
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
+
+/**
+ * Silent live refresh (Kasan's Option A, 2026-09-03). ANY stock movement anywhere —
+ * a sale, a delivery, an adjustment, a transfer leg — re-reads the table and the KPI strip.
+ *
+ * ⚠️ Reaching the back office at all is new: `stock.changed` was emitted to the STORE room
+ * only from sales and refunds, so this page had no event to listen for. It is emitted to
+ * both rooms now, from `applyMovement` itself.
+ *
+ * The strip and the table are refreshed together on purpose — the strip is store-scoped and
+ * filter-independent while the table is neither, so refreshing one alone would let the two
+ * disagree, which is the exact fault that killed the original summary strip.
+ */
+useLiveData(STOCK_EVENTS, () => Promise.all([fetchSummary(), fetchPage({ silent: true })]))
 
 onMounted(async () => {
   reference.value = await apiFetch<CatalogReference>('/catalog/reference')
@@ -128,7 +144,7 @@ onMounted(async () => {
 watch([storeId], fetchSummary, { immediate: true })
 watch(
   [search, categories, cannabinoids, stock, storeId, includeInactive, page],
-  fetchPage,
+  () => void fetchPage(),
   { immediate: true },
 )
 

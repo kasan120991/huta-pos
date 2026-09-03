@@ -219,13 +219,6 @@ function emitTransferChanged(row: {
   emitToAdmin(event)
 }
 
-function emitStockChanged(storeId: string, variantIds: readonly string[]): void {
-  for (const variantId of variantIds) {
-    emitToStore(storeId, { name: 'stock.changed', payload: { storeId, variantId } })
-    emitToAdmin({ name: 'stock.changed', payload: { storeId, variantId } })
-  }
-}
-
 function requireActor(principal: Principal, verb: string): string {
   if (principal.userId === null) {
     throw new ForbiddenError(`A transfer ${verb} needs an acting user.`)
@@ -556,7 +549,7 @@ export async function shipTransfer(principal: Principal, id: string): Promise<Tr
   const userId = requireActor(principal, 'shipment')
   const showCost = canSeeCost(principal)
 
-  const { row, movedVariantIds, sourceStoreId } = await prisma.$transaction(async (tx) => {
+  const { row } = await prisma.$transaction(async (tx) => {
     const locked = await lockTransfer(tx, id)
     assertInvolvedOr404(principal, locked)
     assertCan(principal, 'transfer.fulfill', { storeId: locked.sourceStoreId })
@@ -574,7 +567,6 @@ export async function shipTransfer(principal: Principal, id: string): Promise<Tr
       orderBy: { variantId: 'asc' },
     })
 
-    const moved: string[] = []
     for (const line of lines) {
       const approved = line.quantityApprovedBase ?? 0
       if (approved === 0) continue
@@ -602,7 +594,6 @@ export async function shipTransfer(principal: Principal, id: string): Promise<Tr
         where: { id: line.id },
         data: { shippedCostCents: relieved },
       })
-      moved.push(line.variantId)
     }
 
     await tx.transferRequest.update({
@@ -616,13 +607,12 @@ export async function shipTransfer(principal: Principal, id: string): Promise<Tr
 
     return {
       row: await readTransfer(tx, id, showCost),
-      movedVariantIds: moved,
-      sourceStoreId: locked.sourceStoreId,
     }
   })
 
   emitTransferChanged(row)
-  emitStockChanged(sourceStoreId, movedVariantIds)
+  // `stock.changed` now comes from `applyMovement` via the request scope — see
+  // realtime/stock-events.ts. Emitting it here as well would double every event.
   return toTransferRow(row, showCost)
 }
 
@@ -634,7 +624,7 @@ export async function receiveTransfer(
   const userId = requireActor(principal, 'receipt')
   const showCost = canSeeCost(principal)
 
-  const { row, movedVariantIds, requestingStoreId } = await prisma.$transaction(async (tx) => {
+  const { row } = await prisma.$transaction(async (tx) => {
     const locked = await lockTransfer(tx, id)
     assertInvolvedOr404(principal, locked)
     assertCan(principal, 'transfer.confirmReceipt', { storeId: locked.requestingStoreId })
@@ -665,7 +655,6 @@ export async function receiveTransfer(
       counts.set(override.lineId, override.receivedBase)
     }
 
-    const moved: string[] = []
     for (const line of lines) {
       const approved = line.quantityApprovedBase ?? 0
       const received = counts.get(line.id) ?? approved
@@ -703,7 +692,6 @@ export async function receiveTransfer(
         },
         tx,
       )
-      moved.push(line.variantId)
     }
 
     await tx.transferRequest.update({
@@ -717,13 +705,10 @@ export async function receiveTransfer(
 
     return {
       row: await readTransfer(tx, id, showCost),
-      movedVariantIds: moved,
-      requestingStoreId: locked.requestingStoreId,
     }
   })
 
   emitTransferChanged(row)
-  emitStockChanged(requestingStoreId, movedVariantIds)
   return toTransferRow(row, showCost)
 }
 
@@ -846,8 +831,5 @@ export async function directMove(
   })
 
   emitTransferChanged(row)
-  const variantIds = input.lines.map((line) => line.variantId)
-  emitStockChanged(input.fromStoreId, variantIds)
-  emitStockChanged(input.toStoreId, variantIds)
   return toTransferRow(row, showCost)
 }

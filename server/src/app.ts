@@ -21,6 +21,7 @@ import { authenticate } from './middleware/authenticate.js'
 import { csrfProtection } from './middleware/csrf.js'
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js'
 import { requestId } from './middleware/validate.js'
+import { stockEventScope } from './realtime/stock-events.js'
 
 /**
  * Builds the Express app WITHOUT listening, so tests can mount it with supertest and no
@@ -63,6 +64,11 @@ export function createApp(): Express {
 
   app.use(authenticate)
   app.use(csrfProtection)
+
+  // Collect every `stock.changed` the request produces and emit them once the response is
+  // out — see realtime/stock-events.ts. Mounted here rather than per-router so a service
+  // that moves stock is live by construction instead of by remembering.
+  app.use(stockEventScope)
 
   app.use('/api/auth', authRouter)
   app.use('/api/catalog', catalogRouter)

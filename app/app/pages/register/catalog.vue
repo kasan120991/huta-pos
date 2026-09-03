@@ -14,6 +14,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '~/
 import { Button } from '~/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '~/components/ui/toggle-group'
 import { apiFetch } from '~/composables/useApi'
+import { STOCK_EVENTS, useLiveData } from '~/composables/useLiveData'
 import { useAuthStore } from '~/stores/auth'
 
 /**
@@ -111,6 +112,20 @@ async function onCameraScanned(code: string) {
   }
 }
 
+/** The grid's filters, in one place so the paging read and the live refresh cannot drift. */
+function gridQuery(page: number, pageSize: number) {
+  const q = term.value.trim()
+  return {
+    ...(q.length >= 2 ? { search: q } : {}),
+    ...(categoryId.value ? { categories: [categoryId.value] } : {}),
+    ...(cannabinoidIds.value.length ? { cannabinoids: cannabinoidIds.value } : {}),
+    // The grid is scoped HERE — its badges mean "out at this counter".
+    ...(auth.terminal ? { storeId: auth.terminal.store.id } : {}),
+    page,
+    pageSize,
+  }
+}
+
 async function loadProducts(append = false) {
   if (append) loadingMore.value = true
   else loadingProducts.value = true
@@ -118,15 +133,7 @@ async function loadProducts(append = false) {
     const q = term.value.trim()
     const wanted = append ? page.value + 1 : 1
     const res = await apiFetch<CatalogPage>('/catalog/products', {
-      query: {
-        ...(q.length >= 2 ? { search: q } : {}),
-        ...(categoryId.value ? { categories: [categoryId.value] } : {}),
-        ...(cannabinoidIds.value.length ? { cannabinoids: cannabinoidIds.value } : {}),
-        // The grid is scoped HERE — its badges mean "out at this counter".
-        ...(auth.terminal ? { storeId: auth.terminal.store.id } : {}),
-        page: wanted,
-        pageSize: PAGE_SIZE,
-      },
+      query: gridQuery(wanted, PAGE_SIZE),
     })
     const batch = res.products as CatalogProduct[]
     products.value = append ? [...products.value, ...batch] : batch
@@ -230,6 +237,41 @@ function hereQty(product: CatalogProduct): string | null {
   if (!row) return null
   return qty(row.quantityBase, product.stock.trackingMode)
 }
+
+/**
+ * Silent live refresh (Kasan's Option A, 2026-09-03): a sale at the till beside this one,
+ * a delivery, an adjustment — the on-hand badges restate themselves with no reload.
+ *
+ * ⚠️ It cannot go through `loadProducts()`, which resets to page one. Someone who has
+ * pressed "Load more" four times to reach 108 of 108 would be snapped back to 24 rows by a
+ * sale they had nothing to do with. This asks for ONE page the size of everything already
+ * on screen, so the visible list is restated at exactly its current length.
+ */
+async function refreshGrid() {
+  const res = await apiFetch<CatalogPage>('/catalog/products', {
+    query: gridQuery(1, PAGE_SIZE * page.value),
+  })
+  products.value = res.products as CatalogProduct[]
+  total.value = res.total
+}
+
+/**
+ * ⚠️ And it cannot go through `select()` either — that resets the variant picker to the
+ * cheapest strain. A cashier reading Purple Haze's ladder would be thrown back to Blue
+ * Dream by an unrelated sale. The chosen variant is kept unless it has genuinely gone.
+ */
+async function refreshInspector() {
+  const open = detail.value
+  if (!open) return
+  const fresh = await apiFetch<CatalogProductDetail>(`/catalog/products/${open.id}`)
+  const keep = selectedVariantId.value
+  detail.value = fresh
+  selectedVariantId.value = fresh.variants.some((v) => v.id === keep)
+    ? keep
+    : (fresh.variants[0]?.id ?? null)
+}
+
+useLiveData(STOCK_EVENTS, () => Promise.all([refreshGrid(), refreshInspector()]))
 
 /* ————— the inspector ————— */
 const detail = ref<CatalogProductDetail | null>(null)

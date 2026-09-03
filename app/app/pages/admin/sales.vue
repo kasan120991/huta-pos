@@ -30,6 +30,8 @@ import {
   TableRow,
 } from '~/components/ui/table'
 import { ApiError, apiFetch } from '~/composables/useApi'
+import { SALE_EVENTS, useLiveData } from '~/composables/useLiveData'
+import LiveUpdatesNotice from '~/components/LiveUpdatesNotice.vue'
 import { STATUS_BADGE, money, saleNumber } from '~/lib/sale-format'
 
 /**
@@ -201,24 +203,58 @@ const reference = ref<CatalogReference | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 
-async function fetchAll() {
-  loading.value = true
-  error.value = null
+/** The ledger rows. Held behind a notice when they arrive live — see below. */
+async function fetchList() {
+  pageData.value = await apiFetch<SalesPage>('/sales', {
+    query: { ...filters.value, page: page.value, pageSize: 50 },
+  })
+}
+
+/** The KPI strip. Fixed positions, so it refreshes silently. */
+async function fetchTotals() {
+  totals.value = await apiFetch<SalesTotals>('/sales/totals', { query: filters.value })
+}
+
+async function fetchAll(options: { silent?: boolean } = {}) {
+  const silent = options.silent === true
+  if (!silent) {
+    loading.value = true
+    error.value = null
+  }
   try {
-    const [list, sums] = await Promise.all([
-      apiFetch<SalesPage>('/sales', {
-        query: { ...filters.value, page: page.value, pageSize: 50 },
-      }),
-      apiFetch<SalesTotals>('/sales/totals', { query: filters.value }),
-    ])
-    pageData.value = list
-    totals.value = sums
+    await Promise.all([fetchList(), fetchTotals()])
   } catch (err) {
-    error.value = err instanceof ApiError ? err.message : 'Could not load the sales.'
+    if (!silent) error.value = err instanceof ApiError ? err.message : 'Could not load the sales.'
+    throw err
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
+
+/**
+ * Silent live refresh (Kasan's Option A, 2026-09-03): a sale, refund or void anywhere in
+ * scope re-reads this screen in place — no pill, no flash, no tap.
+ *
+ * `silent` is what keeps it silent, and it suppresses two things rather than one: the
+ * loading veil, and the error write. A background refetch that fails must not paint
+ * "Could not load" over a screen that is already showing good data — the user did not ask
+ * for this fetch and cannot act on its failure. `useLiveData` swallows the rejection.
+ */
+/**
+ * Live updates, Kasan's Option B (2026-09-03): **quiet for figures, held for rows.**
+ *
+ * The KPI strip refreshes on its own — those figures sit in fixed positions, so nothing
+ * moves under the reader and a stale total is simply wrong. The LEDGER does not: a new sale
+ * inserts at the top and shifts every row down, and this page keeps its selection and its
+ * open receipt drawer in the URL. So rows are held behind a count and dropped in on request.
+ *
+ * ⚠️ The two calls listen to the same events on purpose. Splitting them is what lets the
+ * page be never-wrong without being jumpy.
+ */
+useLiveData(SALE_EVENTS, fetchTotals)
+const { pending: pendingRows, apply: applyRows } = useLiveData(SALE_EVENTS, fetchList, {
+  defer: true,
+})
 
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 watch(numberTerm, () => {
@@ -563,6 +599,8 @@ const netOf = (row: SaleHistoryRow) => row.totalCents - row.refundedCents
         <div class="text-xs text-muted-foreground">Card</div>
       </div>
     </div>
+
+    <LiveUpdatesNotice :count="pendingRows" @apply="applyRows" />
 
     <!-- the ledger -->
     <div class="rounded-xl border bg-card" :class="loading ? 'pointer-events-none opacity-50' : ''">

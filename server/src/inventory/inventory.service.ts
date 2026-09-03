@@ -12,6 +12,7 @@ import type { Principal } from '../auth/principal.js'
 import { prisma } from '../db/client.js'
 import { ConflictError, InsufficientStockError, NotFoundError } from '../errors/index.js'
 import type { Prisma } from '../generated/prisma/client.js'
+import { recordStockChange } from '../realtime/stock-events.js'
 
 /**
  * The single chokepoint for every stock change in the system.
@@ -131,8 +132,18 @@ export async function applyMovement(
     }
   }
 
-  if (tx) return applyMovementIn(tx, input)
-  return prisma.$transaction((inner) => applyMovementIn(inner, input))
+  // Announce the change to every screen that renders this variant's stock. This is the ONE
+  // place it happens: see realtime/stock-events.ts for why the emit is recorded here and
+  // flushed by the caller's commit rather than fired inline.
+  if (tx) {
+    const result = await applyMovementIn(tx, input)
+    recordStockChange(input.storeId, input.variantId)
+    return result
+  }
+
+  const owned = await prisma.$transaction((inner) => applyMovementIn(inner, input))
+  recordStockChange(input.storeId, input.variantId)
+  return owned
 }
 
 async function applyMovementIn(tx: Db, input: MovementInput): Promise<MovementResult> {
