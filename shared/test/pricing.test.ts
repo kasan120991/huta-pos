@@ -29,7 +29,7 @@ describe('extendPerGram', () => {
     expect(extendPerGram(centsPerGram(rate), baseQuantity(quantity))).toBe(expected)
   })
 
-  it('matches the worked example in the house rules — 5g at the eighth rate is $42.85', () => {
+  it('matches the documented worked example — 5g at the eighth rate is $42.85', () => {
     expect(extendPerGram(centsPerGram(857), baseQuantity(5000))).toBe(4285)
   })
 })

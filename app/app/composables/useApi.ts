@@ -157,7 +157,7 @@ function shouldAttemptRefresh(path: string): boolean {
  *
  * This single-flight is NOT an optimisation, it is a correctness requirement. Refresh
  * tokens ROTATE, and presenting an already-rotated one is treated as a replay: the server
- * revokes the whole token family and both parties have to sign in again (the house rules, Auth).
+ * revokes the whole token family and both parties have to sign in again (Auth).
  * A page that fires five parallel requests would, without this, send five refreshes with
  * the same cookie and hard-log the admin out — the exact opposite of the fix.
  */
@@ -205,7 +205,7 @@ async function refreshSession(): Promise<boolean> {
  *
  * Two different endings, and they need different doors: if the DEVICE is still paired but
  * nobody is attached, the remedy is the roster (`/register/sign-in`); if the device token
- * itself is gone, it is `/register/pair`. the house rules are explicit that a signed-out device's
+ * itself is gone, it is `/register/pair`. The house rules are explicit that a signed-out device's
  * remedy is pairing and never `/login`.
  *
  * Called only after re-asking the server who we are, because the page's cached principal is

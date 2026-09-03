@@ -184,7 +184,7 @@ export async function checkout(principal: Principal, input: CheckoutInput): Prom
       // Checkout extras the quote does not carry: the supplier to attribute the sale
       // to, and whether the line is cannabinoid-bearing. BOTH are read at the variant
       // level first and fall back to the product — strains are variants of one flower
-      // product (the house rules, Domain model), so reading the product alone would attribute
+      // product (Domain model), so reading the product alone would attribute
       // every strain to one supplier and miss a strain whose potency is recorded on the
       // variant. See catalog/variant-identity.ts for the rules.
       const variantIds = [...new Set(quoted.lines.map((l) => l.variantId))]

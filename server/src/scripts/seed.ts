@@ -695,7 +695,7 @@ async function main(): Promise<void> {
   writeFileSync(outFile, rendered, 'utf8')
   console.log(`Report written to ${outFile}`)
 
-  // Credentials go to a gitignored FILE, not to stdout. the house rules forbid logging PINs
+  // Credentials go to a gitignored FILE, not to stdout. The house rules forbid logging PINs
   // and tokens, and a device token in a terminal scrollback is a device token in a
   // screenshot.
   const credentialsFile = path.join(outDir, 'dev-credentials.txt')

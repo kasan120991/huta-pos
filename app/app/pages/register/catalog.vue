@@ -606,9 +606,9 @@ const detailImage = computed(() => {
 
           The defect this fixes: "Ring it up" used to sit in the content flow, so it landed
           at 245px on a single-variant product and 494px on flower — a 250px swing on the one
-          control that matters. The house pattern already exists (the house rules on
-          `ReceiptCounter`: the action bar spans the pane at the bottom "so the button is in
-          the same place whether a sale has one line or nine").
+          control that matters. The pattern already exists on `ReceiptCounter`, whose action
+          bar spans the pane at the bottom so the button is in the same place whether a sale
+          has one line or nine.
 
           Measured alongside: the pane runs 48-72% empty, because it reserves structure for
           content the catalogue does not have — 2 descriptions and 0 COAs across 286 active

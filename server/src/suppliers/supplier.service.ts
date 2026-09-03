@@ -9,7 +9,7 @@ import { ConflictError, NotFoundError } from '../errors/index.js'
 /**
  * Supplier records.
  *
- * the permission matrix grants staff "view supplier records — contact info only".
+ * The permission matrix grants staff "view supplier records — contact info only".
  * The commercial terms — account number, payment terms, minimum order, internal notes —
  * are what we negotiated, not what a rep tells anyone who asks, and they are the fields a
  * supplier's competitor would most like to see.

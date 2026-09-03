@@ -1,7 +1,7 @@
 -- Invariants Prisma's schema language cannot express. These are the rules that keep
 -- money and stock honest, so they belong in the database rather than only in service
 -- code — a bad migration, a manual psql session, or a future bug should all bounce off
--- them. See the house rules.
+-- them.
 
 -- ---------------------------------------------------------------------------
 -- Users: STAFF are scoped to exactly one store, ADMINs to none.

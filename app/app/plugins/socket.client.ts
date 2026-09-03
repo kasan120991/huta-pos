@@ -25,7 +25,8 @@ import { type Socket, io } from 'socket.io-client'
  * THE SCHEME IS MIRRORED, NOT ASSUMED. `DEV_TLS=1` serves the page over https, and an
  * http://:3001 socket from an https page is mixed content the browser blocks outright.
  * This used to be handled by skipping the connection entirely, which quietly turned
- * realtime OFF in the exact mode the documented setup tells you to run for the iPad camera scanner —
+ * realtime OFF in the exact mode the documented setup tells you to run for the iPad
+ * camera scanner —
  * the transfers toast and the rail's needs-action badge had therefore never once fired on
  * that setup. The API now serves TLS under the same flag and the same cert pair, so the
  * page's own protocol is the right one to dial.

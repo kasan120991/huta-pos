@@ -3,7 +3,7 @@ import { execSync } from 'node:child_process'
 /**
  * Integration-test database.
  *
- * A SEPARATE database from the dev one, created and migrated once per run. the house rules
+ * A SEPARATE database from the dev one, created and migrated once per run. The house rules
  * forbids `prisma migrate reset` against anything but the local container, and running
  * tests against the dev database would destroy the seeded catalog the app is being built
  * against. `migrate deploy` never drops anything.

@@ -12,7 +12,7 @@ import { ADMIN_ROOM, storeRoom } from './io.js'
  *
  * So the io is INJECTED at boot and every emit NO-OPS until it is. Emitting stays what it
  * should be: a fire-and-forget side effect that the business logic does not depend on.
- * the house rules are explicit that a socket payload is a hint to refetch, never the thing that
+ * The house rules are explicit that a socket payload is a hint to refetch, never the thing that
  * makes a change real — a dropped event must cost nothing but a slower refresh.
  */
 

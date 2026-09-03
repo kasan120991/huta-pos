@@ -13,7 +13,7 @@ import {
  * Catalog reads.
  *
  * Cost visibility is decided HERE, by choosing the Prisma `select` — not by fetching
- * everything and deleting keys on the way out. the house rules are explicit that cost must never
+ * everything and deleting keys on the way out. The house rules are explicit that cost must never
  * leave the database for a principal that may not see it, and a delete-on-exit approach is
  * one forgotten code path away from leaking.
  */
@@ -244,7 +244,8 @@ const VARIANT_ORDER = [
  * Which stores' numbers this request sees.
  *
  * The catalog's store selector is a view over the read-only cross-store stock lookup that
- * the permission matrix grants to everyone, so this is not `scopeStoreId` — that helper throws for an
+ * The permission matrix grants this to everyone, so it is not `scopeStoreId` — that helper throws
+ * for an
  * admin naming no store, which is right for a store-scoped write and wrong for a
  * deliberately cross-store read. The capability check stays explicit rather than implied.
  */

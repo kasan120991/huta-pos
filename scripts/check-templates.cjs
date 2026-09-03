@@ -3,7 +3,8 @@
  * Compile every authored SFC template and report errors.
  *
  * `pnpm typecheck` does NOT check Vue templates — `typescript.typeCheck` is false in
- * nuxt.config, which is why the house standard insists every UI change is verified in a real browser.
+ * nuxt.config, which is why the house standard insists every UI change is verified in
+ * a real browser.
  * This closes the cheapest part of that gap: an unbalanced tag or a malformed directive is a
  * compile error the type checker sails past and the browser only shows as a blank page.
  */

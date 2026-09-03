@@ -3,7 +3,7 @@
 -- "Best outcome for the customer" combines stackable promotions, so more than one can
 -- price a single line. `SaleLine."promotionId"` was a single nullable FK, which would have
 -- recorded exactly one of them and under-reported every other promotion's performance.
--- the house rules are explicit that these snapshots "must be written correctly from the very
+-- The house rules are explicit that these snapshots "must be written correctly from the very
 -- first sale — none of them can be backfilled."
 --
 -- Dropping the column is free: Sale, SaleLine and Refund are all empty. Keeping both would

@@ -102,7 +102,7 @@ export interface PriceTierLike {
  *    rate and multiplying back does not round-trip: a 28g tier entered as $200.00 derives
  *    714 c/g and rings up 714 x 28 = $199.92; a 7g tier entered as $55.00 derives 786 c/g
  *    and rings up $55.02. Only the eighth happens to reconcile (857 x 3.5 = 2999.5, which
- *    rounds to exactly 3000), which is why the worked example in the house rules looked fine.
+ *    rounds to exactly 3000), which is why the documented worked example looked fine.
  *    An admin who types $200 must see $200.
  *
  * 2. ABOVE the threshold, never charge less than the tier total. Because the derived rate

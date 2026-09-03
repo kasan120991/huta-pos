@@ -5,7 +5,7 @@
  * Nuxt auto-imports `components/`, but NOT `components/ui/` — those are explicit imports. A
  * missing one is only a console WARNING ("Failed to resolve component"), so the element
  * renders as unknown markup: unstyled, inert, and invisible to `pnpm typecheck` AND to the
- * template compiler. the house notes record the same trap for path-prefixed component names.
+ * template compiler. The house notes record the same trap for path-prefixed component names.
  */
 const fs = require('node:fs')
 const path = require('node:path')

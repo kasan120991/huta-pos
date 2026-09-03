@@ -1,7 +1,7 @@
 /**
  * Weighted-average inventory costing.
  *
- * the house rules settles the costing method as WEIGHTED AVERAGE, scoped per store: each store's
+ * The house rules settles the costing method as WEIGHTED AVERAGE, scoped per store: each store's
  * on-hand stock carries its own cost basis, so a store that bought a variant at $4/g and
  * one that bought it at $5/g each report an honest margin rather than a blend neither of
  * them paid.
@@ -14,7 +14,7 @@
  * THIS MODULE IS THE ONLY PLACE THE MILLIGRAM/GRAM FACTOR APPEARS IN COSTING. A WEIGHT
  * variant's cost is quoted per GRAM while its quantity counts MILLIGRAMS, so multiplying
  * the two directly overstates cost by 1000x — and a margin that is wrong by three orders
- * of magnitude still looks like a number, which is what makes it dangerous. the house rules
+ * of magnitude still looks like a number, which is what makes it dangerous. The house rules
  * forbids an inline `* 1000` for exactly this reason.
  */
 

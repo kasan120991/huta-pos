@@ -7,7 +7,7 @@ import { zCuid, zPin } from './primitives.js'
  * Auth request schemas.
  *
  * Both sides import these: the server validates with them, the login form validates
- * against the same rules before it ever hits the network. the house rules — if both sides need
+ * against the same rules before it ever hits the network. The house rules — if both sides need
  * a type, it goes in `shared/`.
  *
  * For request TYPES reach for `z.input<>`, not `z.infer<>`: transforms make the two

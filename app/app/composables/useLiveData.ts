@@ -34,7 +34,7 @@ import { type Ref, onMounted, onUnmounted, ref } from 'vue'
  * usually after resolving auth and in a specific order; a second fetch from here would
  * double every page load and race the first.
  *
- * ⚠️ The payload is never read. the house rule is that a socket event is a hint to
+ * ⚠️ The payload is never read. The house rule is that a socket event is a hint to
  * refetch, never the thing that makes a change real — so this takes event NAMES and a
  * loader, and offers no way to fold a payload into state. A dropped event costs a slower
  * refresh and nothing else.

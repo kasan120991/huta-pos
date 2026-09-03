@@ -1,8 +1,8 @@
 -- Reverse the receipt posted by accident on 2026-08-22 against PO-0007 (Lost8s).
 --
--- The receipt was posted while driving /register/receiving to verify a form-control conversion.
--- It linked to PO-0007, moved 10 + 10 units into Main Store (Baytree), and flipped the order
--- from ORDERED to RECEIVED.
+-- The receipt was posted while driving /register/receiving to verify a form-control
+-- conversion. It linked to PO-0007, moved 10 + 10 units into Main Store (Baytree), and
+-- flipped the order from ORDERED to RECEIVED.
 --
 -- This deliberately breaks the append-only rule for inventory movements and receipts.
 -- It is a one-off correction of fabricated data on the DEV database, authorised by Kasan —

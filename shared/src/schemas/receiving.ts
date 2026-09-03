@@ -33,8 +33,8 @@ export interface SupplierRow {
   readonly productCount: number
 
   /**
-   * Commercial terms. Present ONLY for a principal that may see them — the permission matrix grants
-   * staff "contact info only" on supplier records.
+   * Commercial terms. Present ONLY for a principal that may see them — the permission
+   * matrix grants staff "contact info only" on supplier records.
    */
   readonly accountNumber?: string | null
   readonly paymentTerms?: string | null

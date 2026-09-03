@@ -71,7 +71,7 @@ export function errorHandler(
  * Log the shape of a failure, never its content.
  *
  * No request body, no headers, no cookies — those carry PINs, passwords and tokens, and
- * the house rules forbid logging any of them.
+ * The house rules forbid logging any of them.
  */
 function logSafely(
   req: Request,

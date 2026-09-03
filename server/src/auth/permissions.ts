@@ -9,7 +9,7 @@ import { type Principal, isAdmin, isStaff } from './principal.js'
  * a bug even when it returns the right answer, because the next handler will get it
  * wrong and nothing will notice.
  *
- * The matrix below is the roles-and-permissions matrix, transcribed.
+ * The matrix below is the project's roles-and-permissions table, transcribed.
  */
 
 export const CAPABILITIES = [
@@ -136,7 +136,7 @@ export function scopeStoreId(principal: Principal, requested?: string): string {
 /**
  * Whether cost, margin and supplier pricing may be included in a response.
  *
- * the house rules are explicit that this is stripped server-side, not hidden in the UI. Call
+ * The house rules are explicit that this is stripped server-side, not hidden in the UI. Call
  * this to choose the Prisma `select`, so cost never leaves the database for a principal
  * that may not see it — rather than fetching it and remembering to delete the key.
  */

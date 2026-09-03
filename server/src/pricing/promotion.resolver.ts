@@ -162,7 +162,7 @@ function runSequentially(
 /**
  * Pick the outcome that costs the customer least.
  *
- * the house rules says only stackable promotions combine and otherwise the single best-scoped
+ * The house rules says only stackable promotions combine and otherwise the single best-scoped
  * one applies — which leaves open what happens when both kinds match. Kasan chose: compute
  * the best non-stackable ALONE and all stackables COMBINED, then charge the lower. The
  * losing candidate is reported rather than dropped, because a real promotion that quietly

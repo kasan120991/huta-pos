@@ -1,6 +1,6 @@
 -- Weighted-average costing, scoped per store.
 --
--- the design left the costing method open: "when the same variant is received at different
+-- The design left the costing method open: "when the same variant is received at different
 -- costs, is margin computed on last cost, weighted average, or FIFO?" Settled as WEIGHTED
 -- AVERAGE, per store. Each store's on-hand stock carries its own cost basis, so a store
 -- that received a variant at $4/g and one that received it at $5/g each report an honest

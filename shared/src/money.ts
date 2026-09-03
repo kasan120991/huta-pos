@@ -66,7 +66,7 @@ export function subtractBps(amount: Cents, rate: Bps): Cents {
  * Hand-rolled rather than `Intl.NumberFormat`.
  *
  * Intl's currency output varies with ICU version and between Node and browsers — some
- * locales emit U+2212 MINUS and a non-breaking space. the house rules requires the server and
+ * locales emit U+2212 MINUS and a non-breaking space. The house rules requires the server and
  * the register to format identically, and receipts to be byte-stable; this guarantees
  * both. Grouping still uses `toLocaleString`, which is stable for a bare integer.
  */

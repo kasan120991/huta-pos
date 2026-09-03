@@ -23,7 +23,7 @@ import { apiFetch } from '~/composables/useApi'
  * The strain shelf (Kasan's B2 pick, 2026-08-21) — every strain on one flower product,
  * side by side. Editing opens StrainDialog (the D1 pick); this card is read-only.
  *
- * It exists because strains are VARIANTS of one flower Product (the house rules, Domain model),
+ * It exists because strains are VARIANTS of one flower Product (Domain model),
  * so the question that matters before anything goes on a shelf is comparative: which of
  * these is missing a COA, which has no potency figure, which came from which supplier.
  * A dialog answers one strain at a time and cannot answer that.
