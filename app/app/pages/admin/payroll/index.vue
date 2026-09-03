@@ -27,6 +27,7 @@ import {
   AlertDialogTitle,
 } from '~/components/ui/alert-dialog'
 import { money } from '~/lib/sale-format'
+import { blockerView, payDay, periodLabel } from '~/lib/people-format'
 import { ApiError, apiFetch } from '~/composables/useApi'
 
 /**
@@ -106,36 +107,14 @@ watch(
 
 const current = computed(() => periods.value.find((p) => p.periodStartDate === selected.value) ?? null)
 
-const dateFmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
-/** Parsed at noon so a bare date never lands on the previous day through a zone offset. */
-const day = (d: string) => dateFmt.format(new Date(`${d}T12:00:00`))
-const periodLabel = (p: { periodStartDate: string, periodEndDate: string }) =>
-  `${day(p.periodStartDate)} – ${day(p.periodEndDate)}`
-
 const hm = (minutes: number) => formatMinutesAsHours(minutes)
 
-const BLOCKER_LABEL: Record<string, { label: string, tone: string }> = {
-  OPEN_ENTRY: { label: 'Still clocked in', tone: 'bg-amber-500/15 text-amber-500' },
-  ESTIMATED_ENTRY: { label: 'Estimated', tone: 'bg-amber-500/15 text-amber-500' },
-  NO_WAGE_RATE: { label: 'No wage', tone: 'bg-red-400/15 text-red-400' },
-}
-
-function blockerSentence(b: PayrollPreview['blockers'][number]): string {
-  if (b.kind === 'NO_WAGE_RATE') {
-    return `worked this fortnight, but no hourly rate is on file for the week of ${day(b.weekStartDate ?? '')}`
-  }
-  const when = b.at ? new Date(b.at) : null
-  const on = when
-    ? new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(when)
-    : 'that fortnight'
-  return b.kind === 'OPEN_ENTRY'
-    ? `clocked in ${on} and is still on the clock`
-    : `clocked in ${on} and never clocked out — the end time is a guess`
-}
-
-/** Straight to the entry that needs fixing, or to the wage that is missing. */
-const blockerHref = (b: PayrollPreview['blockers'][number]) =>
-  `/admin/staff?person=${b.userId}&tab=${b.kind === 'NO_WAGE_RATE' ? 'overview' : 'hours'}`
+/**
+ * The blocker vocabulary moved to `lib/people-format.ts` on 2026-09-03, when the staff
+ * command center became a second place that renders these sentences. One copy, so a wording
+ * change lands on both screens.
+ */
+const blocker = (b: PayrollPreview['blockers'][number]) => blockerView(b)
 
 /** ⚠️ Own ref — reka closes an AlertDialog before the fallthrough handler runs. */
 const commitOpen = ref(false)
@@ -235,13 +214,11 @@ async function commit() {
         >
           <span
             class="rounded-full px-2 py-0.5 text-[10px] font-semibold"
-            :class="BLOCKER_LABEL[b.kind]?.tone"
-          >{{ BLOCKER_LABEL[b.kind]?.label }}</span>
-          <span><b>{{ b.userName }}</b> {{ blockerSentence(b) }}</span>
+            :class="blocker(b).tone"
+          >{{ blocker(b).label }}</span>
+          <span><b>{{ b.userName }}</b> {{ blocker(b).sentence }}</span>
           <Button variant="outline" size="sm" class="ml-auto h-7" as-child>
-            <NuxtLink :to="blockerHref(b)">
-              {{ b.kind === 'NO_WAGE_RATE' ? 'Set a wage' : 'Fix the entry' }} →
-            </NuxtLink>
+            <NuxtLink :to="blocker(b).href">{{ blocker(b).action }}</NuxtLink>
           </Button>
         </div>
       </div>
@@ -288,7 +265,7 @@ async function commit() {
                 :key="w.weekStartDate"
                 class="text-right"
               >
-                Week of {{ day(w.weekStartDate) }}
+                Week of {{ payDay(w.weekStartDate) }}
               </TableHead>
               <TableHead class="text-right">Hours</TableHead>
               <TableHead class="text-right">Overtime</TableHead>

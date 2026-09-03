@@ -114,6 +114,14 @@ export interface PayRunRow {
   readonly reversalNote: string | null
   readonly note: string | null
   readonly lineCount: number
+  /**
+   * Money that has actually gone out against this run — the sum of its payouts that still
+   * stand, reversed ones excluded. Derived the same way `PayRunLineRow.paidCents` is, so a
+   * run's figure and the sum of its lines cannot disagree.
+   */
+  readonly paidCents: number
+  /** `grossCents - paidCents`. What is still owed to people on a committed run. */
+  readonly outstandingCents: number
 }
 
 export interface PayoutRow {

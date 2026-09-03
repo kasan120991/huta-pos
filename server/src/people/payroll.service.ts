@@ -490,6 +490,8 @@ async function getRunRow(id: string): Promise<PayRunRow> {
   })
   if (!run) throw new NotFoundError('That pay run does not exist.')
 
+  const paidCents = await paidOnRun(id)
+
   return {
     id: run.id,
     periodStartDate: run.periodStartDate,
@@ -510,19 +512,104 @@ async function getRunRow(id: string): Promise<PayRunRow> {
     reversalNote: run.reversalNote,
     note: run.note,
     lineCount: run._count.lines,
+    paidCents,
+    outstandingCents: run.grossCents - paidCents,
   }
 }
 
+/**
+ * What has actually been paid out against one run — payouts that still stand.
+ *
+ * `getRun` derives the same figure per line from the payouts it has already loaded; this is
+ * for the paths that do not load lines. Both filter `reversedAt: null` for the same reason:
+ * a reversed payout is money that came back, so counting it would report a person as paid
+ * when they are owed.
+ */
+async function paidOnRun(runId: string): Promise<number> {
+  const agg = await prisma.payPayout.aggregate({
+    where: { reversedAt: null, payLine: { payRunId: runId } },
+    _sum: { amountCents: true },
+  })
+  return agg._sum.amountCents ?? 0
+}
+
+/**
+ * Every run, newest first.
+ *
+ * ⚠️ TWO queries whatever the run count. This used to select ids and then call `getRunRow`
+ * in a loop — a hundred sequential round trips for a hundred runs, the exact cost pattern
+ * `activity.service.ts` documents refusing. The payouts come back in ONE `groupBy` and are
+ * joined in memory, the way `listShifts` gets its sale counts.
+ */
 export async function listRuns(principal: Principal): Promise<PayRunRow[]> {
   assertCan(principal, 'user.manage')
+
   const runs = await prisma.payRun.findMany({
     orderBy: [{ periodStart: 'desc' }, { committedAt: 'desc' }],
-    select: { id: true },
+    select: {
+      id: true,
+      periodStartDate: true,
+      status: true,
+      timezone: true,
+      totalMinutes: true,
+      overtimeMinutes: true,
+      regularCents: true,
+      overtimeCents: true,
+      grossCents: true,
+      committedAt: true,
+      reversedAt: true,
+      reversalNote: true,
+      note: true,
+      committedBy: { select: { firstName: true, lastName: true } },
+      reversedBy: { select: { firstName: true, lastName: true } },
+      _count: { select: { lines: true } },
+    },
     take: 100,
   })
-  const out: PayRunRow[] = []
-  for (const r of runs) out.push(await getRunRow(r.id))
-  return out
+  if (runs.length === 0) return []
+
+  // `PayPayout` hangs off the LINE, not the run, so the run id is only reachable through the
+  // relation — group by the line and fold up.
+  const lines = await prisma.payLine.findMany({
+    where: { payRunId: { in: runs.map((r) => r.id) } },
+    select: {
+      payRunId: true,
+      payouts: { where: { reversedAt: null }, select: { amountCents: true } },
+    },
+  })
+
+  const paidByRun = new Map<string, number>()
+  for (const line of lines) {
+    const sum = line.payouts.reduce((a, p) => a + p.amountCents, 0)
+    paidByRun.set(line.payRunId, (paidByRun.get(line.payRunId) ?? 0) + sum)
+  }
+
+  return runs.map((run) => {
+    const paidCents = paidByRun.get(run.id) ?? 0
+    return {
+      id: run.id,
+      periodStartDate: run.periodStartDate,
+      periodEndDate: periodEndDateOf(run.periodStartDate),
+      status: run.status,
+      timezone: run.timezone,
+      totalMinutes: run.totalMinutes,
+      overtimeMinutes: run.overtimeMinutes,
+      regularCents: run.regularCents,
+      overtimeCents: run.overtimeCents,
+      grossCents: run.grossCents,
+      committedByName: `${run.committedBy.firstName} ${run.committedBy.lastName}`.trim(),
+      committedAt: run.committedAt.toISOString(),
+      reversedByName: run.reversedBy
+        ? `${run.reversedBy.firstName} ${run.reversedBy.lastName}`.trim()
+        : null,
+      reversedAt: run.reversedAt?.toISOString() ?? null,
+      reversalNote: run.reversalNote,
+      note: run.note,
+      lineCount: run._count.lines,
+      paidCents,
+      outstandingCents: run.grossCents - paidCents,
+    }
+  })
 }
 
 export async function getRun(principal: Principal, id: string) {

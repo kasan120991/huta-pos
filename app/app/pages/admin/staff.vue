@@ -75,6 +75,8 @@ import { formatMinutesAsHours } from '@huta/shared'
 import { dollars, parseDollars } from '~/lib/money'
 import { ApiError, apiFetch } from '~/composables/useApi'
 import { money, varianceView } from '~/lib/sale-format'
+import { clockTime, payDay, periodLabel } from '~/lib/people-format'
+import { usePeopleOverview } from '~/composables/usePeopleOverview'
 import { Clock, Lock, UserX } from '@lucide/vue'
 
 /**
@@ -113,10 +115,22 @@ const visible = computed(() =>
   showInactive.value ? people.value : people.value.filter((p) => p.active),
 )
 
-/** Locked out, or holding a temporary PIN they have not replaced yet. */
-const needsAttention = computed(() =>
-  people.value.filter((p) => p.active && (isLocked(p) || p.mustChangePin)),
-)
+/**
+ * The command-center band: who is on the clock, what the fortnight is costing, and
+ * everything that needs a human. See `composables/usePeopleOverview.ts` — it holds the
+ * reads and the exception vocabulary so this file does not grow a third copy of either.
+ */
+const overview = usePeopleOverview()
+
+/**
+ * Lockouts, temporary PINs and payroll blockers, as one list.
+ *
+ * ⚠️ This replaced a `needsAttention` computed that counted only the first two. A cashier
+ * locked out of a till and a fortnight nobody can pay are the same question to whoever is
+ * looking at this page — "what do I have to deal with" — and splitting them meant the
+ * payroll half was only ever visible on another screen.
+ */
+const exceptions = computed(() => overview.exceptionsFor(people.value))
 
 function isLocked(p: StaffAdminRow): boolean {
   return p.lockedUntil !== null && new Date(p.lockedUntil) > new Date()
@@ -132,6 +146,10 @@ async function load() {
     ])
     people.value = list.users
     stores.value = reference.stores
+    // After the roster, because the exception list reduces over `people`. Its own failures
+    // are swallowed inside the composable: a payroll endpoint being down must not take the
+    // staff list with it.
+    await overview.load().catch(() => undefined)
   }
   catch (err) {
     pageError.value = err instanceof ApiError ? err.message : 'Something went wrong.'
@@ -141,6 +159,21 @@ async function load() {
   }
 }
 onMounted(load)
+
+/**
+ * Refresh when the tab comes back.
+ *
+ * The band's figures move without anyone touching this page — somebody clocks out at a
+ * register, a fortnight ticks over — and a stale "1 on the clock" is worse than no tile at
+ * all. Deliberately NOT `useLiveData`: its events are sales and stock, and a sale says
+ * nothing about who is working. A `timeclock.changed` socket event is the real answer and
+ * is a separate piece of work; this is the honest version until then.
+ */
+function refreshOnFocus(): void {
+  if (!document.hidden) void load()
+}
+onMounted(() => document.addEventListener('visibilitychange', refreshOnFocus))
+onUnmounted(() => document.removeEventListener('visibilitychange', refreshOnFocus))
 
 /* ————— formatting ————— */
 const fullName = (p: StaffAdminRow) => `${p.firstName} ${p.lastName}`
@@ -566,8 +599,6 @@ async function saveWage() {
 }
 
 const perHour = (cents: number) => `${money(cents)}/hr`
-const payDay = (d: string) =>
-  new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(`${d}T12:00:00`))
 
 const RANGES = [
   { key: '7', label: 'Last 7 days' },
@@ -631,9 +662,6 @@ const hourDays = computed(() => {
  * tab landed beside it.
  */
 const hm = (total: number): string => formatMinutesAsHours(total)
-
-const clockTime = (iso: string) =>
-  new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
 
 /* ————— correcting an entry ————— */
 const fixing = ref<TimeEntryRow | null>(null)
@@ -749,9 +777,9 @@ watch([tab, range], () => {
           <h1 class="text-2xl font-extrabold tracking-tight">Staff</h1>
           <p class="text-sm text-muted-foreground">
             {{ visible.length }} {{ visible.length === 1 ? 'person' : 'people' }}<template
-              v-if="needsAttention.length"
+              v-if="exceptions.length"
             >
-              · {{ needsAttention.length }} need{{ needsAttention.length === 1 ? 's' : '' }} attention</template>
+              · <span class="text-amber-500">{{ exceptions.length }} need{{ exceptions.length === 1 ? 's' : '' }} attention</span></template>
           </p>
         </div>
         <div class="ml-auto flex items-center gap-2">
@@ -765,21 +793,90 @@ watch([tab, range], () => {
       <FieldError v-if="pageError">{{ pageError }}</FieldError>
 
       <!--
-        The states that are WORK, above the table. A locked-out cashier is someone standing at
-        a till right now unable to sign in; it should not need finding.
+        ————— the command-center band —————
+        Three tiles, then the work. ⚠️ "On the clock" and "Accruing" are SEPARATE facts and
+        must stay two tiles: an open entry is not payable, so the hours somebody is working
+        right now are deliberately absent from the money beside them.
       -->
-      <div
-        v-if="needsAttention.length"
-        class="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-amber-500/40 bg-amber-500/8 px-4 py-2.5 text-sm text-amber-600 dark:text-amber-400"
-      >
-        <span
-          v-for="p in needsAttention"
-          :key="p.id"
-          class="font-semibold"
+      <div class="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+        <div
+          class="rounded-xl border bg-card px-4 py-3"
+          :class="overview.onTheClock.value.length ? 'border-primary/40' : ''"
         >
-          {{ fullName(p) }} —
-          {{ isLocked(p) ? `locked out until ${lockedUntilText(p)}` : 'PIN reset not yet used' }}
-        </span>
+          <div class="text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
+            On the clock
+          </div>
+          <p
+            v-if="overview.onTheClock.value.length"
+            class="text-2xl font-extrabold tabular-nums tracking-tight text-primary"
+          >
+            {{ overview.onTheClock.value.length }}
+          </p>
+          <p v-else class="text-lg font-semibold text-muted-foreground">Nobody</p>
+          <p class="mt-0.5 text-xs text-muted-foreground">
+            <template v-if="overview.onTheClock.value.length">
+              <span v-for="(w, i) in overview.onTheClock.value" :key="w.entryId">
+                <template v-if="i">, </template>{{ w.userName }} · {{ w.storeName }} · {{ hm(w.minutes) }}
+              </span>
+            </template>
+            <template v-else>Nobody is clocked in right now.</template>
+          </p>
+        </div>
+
+        <div class="rounded-xl border bg-card px-4 py-3">
+          <div class="text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
+            Accruing this fortnight
+          </div>
+          <p class="text-2xl font-extrabold tabular-nums tracking-tight">
+            {{ money(overview.accruingCents.value) }}
+          </p>
+          <p class="mt-0.5 text-xs text-muted-foreground">
+            {{ hm(overview.accruingMinutes.value) }}
+            <template v-if="overview.openPeriod.value">
+              · {{ periodLabel(overview.openPeriod.value) }}
+            </template>
+          </p>
+        </div>
+
+        <div class="rounded-xl border bg-card px-4 py-3">
+          <div class="text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
+            Owed on committed runs
+          </div>
+          <!-- An em dash, never $0.00: nothing committed is a different fact from nothing owed. -->
+          <p
+            class="text-2xl font-extrabold tabular-nums tracking-tight"
+            :class="overview.owedCents.value > 0 ? 'text-amber-500' : 'text-muted-foreground'"
+          >
+            {{ overview.owedCents.value > 0 ? money(overview.owedCents.value) : '—' }}
+          </p>
+          <p class="mt-0.5 text-xs text-muted-foreground">
+            {{ overview.owedCents.value > 0 ? 'Committed and not yet paid out' : 'Nothing committed is unpaid' }}
+          </p>
+        </div>
+      </div>
+
+      <!--
+        The work. Each row names the person, says what is wrong in a sentence, and offers the
+        one control that fixes it — the exception-ledger shape Drawers and Orders already use.
+      -->
+      <div v-if="exceptions.length" class="overflow-hidden rounded-xl border border-amber-500/40 bg-amber-500/[0.06]">
+        <p class="border-b border-amber-500/25 px-4 py-2 text-[11px] font-bold uppercase tracking-wider text-amber-500">
+          {{ exceptions.length }} thing{{ exceptions.length === 1 ? '' : 's' }} to deal with
+        </p>
+        <div
+          v-for="(x, i) in exceptions"
+          :key="x.id"
+          class="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 text-sm"
+          :class="i ? 'border-t border-amber-500/15' : ''"
+        >
+          <span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="x.tone">{{ x.label }}</span>
+          <span class="min-w-0 flex-1 text-muted-foreground">
+            <b class="font-semibold text-foreground">{{ x.who }}</b> {{ x.sentence }}
+          </span>
+          <Button as-child variant="outline" size="sm" class="h-7">
+            <NuxtLink :to="x.href">{{ x.action }}</NuxtLink>
+          </Button>
+        </div>
       </div>
 
       <div class="relative">

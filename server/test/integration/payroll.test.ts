@@ -8,6 +8,7 @@ import {
   PAY_PERIOD_ANCHOR_SUNDAY,
   commitRun,
   getRun,
+  listRuns,
   previewRun,
   reverseRun,
 } from '../../src/people/payroll.service.js'
@@ -315,6 +316,60 @@ describe('payroll', () => {
       )
 
       await expect(reverseRun(admin, run.id, 'nope', adminId)).rejects.toBeInstanceOf(ConflictError)
+    })
+
+    describe('what a run has actually paid out', () => {
+    /**
+     * `listRuns` reports `paidCents` without loading lines, while `getRun` derives it per
+     * line from the payouts it already holds. Two derivations of one fact, so the test that
+     * matters is that they AGREE — and that both drop a reversed payout, since money that
+     * came back must not read as money paid.
+     */
+    it('agrees with the per-line sum, and excludes a reversed payout', async () => {
+      await payableFortnight()
+      const run = await commitRun(admin, PERIOD, undefined, adminId)
+      const detail = await getRun(admin, run.id)
+      const lineId = detail.lines[0]!.id
+
+      // Nothing paid yet: outstanding is the whole gross.
+      const [before] = await listRuns(admin)
+      expect(before!.paidCents).toBe(0)
+      expect(before!.outstandingCents).toBe(run.grossCents)
+
+      const kept = await recordPayout(
+        admin,
+        lineId,
+        { method: 'BANK', amountCents: 4_000, reference: 'TRF-KEEP' },
+        adminId,
+      )
+      const undone = await recordPayout(
+        admin,
+        lineId,
+        { method: 'BANK', amountCents: 2_500, reference: 'TRF-OOPS' },
+        adminId,
+      )
+      await reversePayout(admin, undone.id, 'keyed twice', adminId)
+
+      const [after] = await listRuns(admin)
+      expect(after!.paidCents).toBe(4_000)
+      expect(after!.outstandingCents).toBe(run.grossCents - 4_000)
+
+      // The two derivations must not drift.
+      const fresh = await getRun(admin, run.id)
+      const perLine = fresh.lines.reduce((n, l) => n + l.paidCents, 0)
+      expect(after!.paidCents).toBe(perLine)
+      expect(kept.id).not.toBe(undone.id)
+    })
+
+    it('reports every run in one call, newest period first', async () => {
+      await payableFortnight()
+      await commitRun(admin, PERIOD, undefined, adminId)
+
+      const runs = await listRuns(admin)
+      expect(runs).toHaveLength(1)
+      expect(runs[0]!.periodStartDate).toBe(PERIOD)
+      expect(runs[0]!.lineCount).toBeGreaterThan(0)
+      })
     })
   })
 
