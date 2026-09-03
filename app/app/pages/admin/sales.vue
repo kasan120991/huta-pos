@@ -47,7 +47,7 @@ import { STATUS_BADGE, money, saleNumber } from '~/lib/sale-format'
  * this one is deliberately filter-DEPENDENT for exactly that reason.
  */
 definePageMeta({ layout: 'default' })
-useHead({ title: 'Sales · Huta' })
+useHead({ title: 'Transactions · Huta' })
 
 const route = useRoute()
 const router = useRouter()
@@ -404,7 +404,7 @@ const netOf = (row: SaleHistoryRow) => row.totalCents - row.refundedCents
 <template>
   <div class="flex flex-col gap-4">
     <div>
-      <h1 class="text-xl font-semibold tracking-tight">Sales</h1>
+      <h1 class="text-xl font-semibold tracking-tight">Transactions</h1>
       <p class="mt-1 text-sm text-muted-foreground">
         Every transaction, across both stores.
         <template v-if="totals"> Days are cut in {{ totals.timezone.replace('_', ' ') }}.</template>

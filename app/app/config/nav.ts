@@ -26,19 +26,20 @@ export const NAV: NavGroup[] = [
     items: [{ title: 'Dashboard', to: '/', icon: LayoutGrid }],
   },
   {
-    // Called Transactions, not Reports: naming it Reports would promise the Phase-12 margin,
-    // supplier and valuation dashboards, which this is not. (Was "Sales" until 2026-08-24 —
-    // Transactions covers the drawer movements filed here too, which are not sales.)
-    label: 'Transactions',
+    // Called Sales, not Reports: naming it Reports would promise the Phase-12 margin, supplier
+    // and valuation dashboards, which this is not. (Named "Transactions" between 2026-08-24 and
+    // 2026-09-03; the group and its sales item swapped names on Kasan's call.)
+    label: 'Sales',
     items: [
       // Drawers file here, not under Store: a till is money accountability, while the Store
       // group is devices and people. First in the group since 2026-08-24 — the day's takings
       // are the thing looked at most.
       { title: 'Drawers', to: '/admin/drawers', icon: Banknote },
-      // Titled Sales, matching the page's own <h1>. It read "History" until 2026-08-24, which
-      // put the breadcrumb (Transactions › History) at odds with the heading underneath it —
-      // and the breadcrumb resolves against this array precisely so the two cannot drift.
-      { title: 'Sales', to: '/admin/sales', icon: ReceiptText },
+      // Titled Transactions, matching the page's own <h1> and document title — both renamed
+      // alongside this on 2026-09-03. It read "History" until 2026-08-24 and "Sales" until
+      // 2026-09-03; each time the heading moved with it, because the breadcrumb resolves
+      // against this array precisely so the two cannot drift.
+      { title: 'Transactions', to: '/admin/sales', icon: ReceiptText },
       // Payroll files here, not under Store: it is money going out, and it reconciles against
       // the same drawers Drawers reports on.
       { title: 'Payroll', to: '/admin/payroll', icon: HandCoins },
